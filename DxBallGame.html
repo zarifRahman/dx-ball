@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DX-Ball</title>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a14;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Courier New', monospace;
+      overflow: hidden;
+    }
+    #root { display: flex; align-items: center; justify-content: center; width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+const W = 480;
+const H = 640;
+const PADDLE_W = 80;
+const PADDLE_H = 12;
+const PADDLE_Y = H - 48;
+const BALL_R = 8;
+const BRICK_COLS = 10;
+const BRICK_ROWS = 6;
+const BRICK_W = 42;
+const BRICK_H = 18;
+const BRICK_PAD = 3;
+const BRICK_OFFSET_X = (W - (BRICK_COLS * (BRICK_W + BRICK_PAD) - BRICK_PAD)) / 2;
+const BRICK_OFFSET_Y = 48;
+const INITIAL_SPEED = 4.5;
+const MAX_SPEED = 9;
+
+// Brick colour tiers (rows)
+const ROW_COLORS = [
+  { fill: '#ff2d55', stroke: '#ff6b8a', hits: 3 },
+  { fill: '#ff9500', stroke: '#ffbe55', hits: 2 },
+  { fill: '#ffd60a', stroke: '#ffe566', hits: 2 },
+  { fill: '#30d158', stroke: '#7deba0', hits: 1 },
+  { fill: '#0a84ff', stroke: '#5db3ff', hits: 1 },
+  { fill: '#bf5af2', stroke: '#d98bff', hits: 1 },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function buildBricks() {
+  const bricks = [];
+  for (let row = 0; row < BRICK_ROWS; row++) {
+    for (let col = 0; col < BRICK_COLS; col++) {
+      const tier = ROW_COLORS[row];
+      bricks.push({
+        x: BRICK_OFFSET_X + col * (BRICK_W + BRICK_PAD),
+        y: BRICK_OFFSET_Y + row * (BRICK_H + BRICK_PAD),
+        w: BRICK_W,
+        h: BRICK_H,
+        alive: true,
+        hits: tier.hits,
+        maxHits: tier.hits,
+        fill: tier.fill,
+        stroke: tier.stroke,
+      });
+    }
+  }
+  return bricks;
+}
+
+function buildInitialState() {
+  return {
+    paddle: { x: W / 2 - PADDLE_W / 2, y: PADDLE_Y, w: PADDLE_W, h: PADDLE_H },
+    ball: { x: W / 2, y: PADDLE_Y - BALL_R - 2, vx: 2.5, vy: -INITIAL_SPEED, r: BALL_R },
+    bricks: buildBricks(),
+    score: 0,
+    lives: 3,
+    phase: 'waiting', // 'waiting' | 'playing' | 'won' | 'lost'
+    particles: [],
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Physics / Update  (pure functions — no React state inside)
+// ─────────────────────────────────────────────────────────────────────────────
+function updateGame(state, keys) {
+  if (state.phase !== 'playing') return state;
+
+  let { paddle, ball, bricks, score, lives, particles } = state;
+
+  // --- Paddle movement ---
+  let px = paddle.x;
+  const PADDLE_SPEED = 6;
+  if (keys.ArrowLeft)  px -= PADDLE_SPEED;
+  if (keys.ArrowRight) px += PADDLE_SPEED;
+  px = Math.max(0, Math.min(W - paddle.w, px));
+  paddle = { ...paddle, x: px };
+
+  // --- Ball movement ---
+  let { x, y, vx, vy, r } = ball;
+  x += vx;
+  y += vy;
+
+  // Wall bounces
+  if (x - r < 0)     { x = r;     vx = Math.abs(vx); }
+  if (x + r > W)     { x = W - r; vx = -Math.abs(vx); }
+  if (y - r < 0)     { y = r;     vy = Math.abs(vy); }
+
+  // Ball lost
+  if (y - r > H + 20) {
+    const newLives = lives - 1;
+    if (newLives <= 0) {
+      return { ...state, lives: 0, phase: 'lost' };
+    }
+    return {
+      ...state,
+      lives: newLives,
+      phase: 'waiting',
+      ball: { x: W / 2, y: PADDLE_Y - BALL_R - 2, vx: 2.5, vy: -INITIAL_SPEED, r: BALL_R },
+      paddle: { ...paddle, x: W / 2 - PADDLE_W / 2 },
+    };
+  }
+
+  // Paddle collision
+  if (
+    vy > 0 &&
+    x > paddle.x - r && x < paddle.x + paddle.w + r &&
+    y + r >= paddle.y && y - r < paddle.y + paddle.h
+  ) {
+    y = paddle.y - r;
+    // Angle based on hit position
+    const hitRatio = (x - (paddle.x + paddle.w / 2)) / (paddle.w / 2);
+    vx = hitRatio * INITIAL_SPEED * 1.2;
+    vy = -Math.sqrt(Math.max(INITIAL_SPEED * INITIAL_SPEED - vx * vx, 4));
+    // Clamp speed
+    const speed = Math.hypot(vx, vy);
+    if (speed > MAX_SPEED) { vx *= MAX_SPEED / speed; vy *= MAX_SPEED / speed; }
+  }
+
+  // Brick collisions
+  let newBricks = bricks;
+  let newScore = score;
+  let newParticles = [...particles];
+
+  for (let i = 0; i < bricks.length; i++) {
+    const b = bricks[i];
+    if (!b.alive) continue;
+
+    const closestX = Math.max(b.x, Math.min(x, b.x + b.w));
+    const closestY = Math.max(b.y, Math.min(y, b.y + b.h));
+    const dx = x - closestX;
+    const dy = y - closestY;
+    if (dx * dx + dy * dy > r * r) continue;
+
+    // Hit!
+    const newHits = b.hits - 1;
+    const stillAlive = newHits > 0;
+
+    // Spawn particles
+    for (let p = 0; p < 8; p++) {
+      const angle = (Math.PI * 2 * p) / 8 + Math.random() * 0.5;
+      const spd = 1.5 + Math.random() * 2.5;
+      newParticles.push({
+        x: b.x + b.w / 2,
+        y: b.y + b.h / 2,
+        vx: Math.cos(angle) * spd,
+        vy: Math.sin(angle) * spd,
+        life: 1,
+        decay: 0.04 + Math.random() * 0.03,
+        color: b.fill,
+        r: 2 + Math.random() * 2,
+      });
+    }
+
+    if (newBricks === bricks) newBricks = [...bricks];
+    newBricks[i] = stillAlive ? { ...b, hits: newHits } : { ...b, alive: false };
+    newScore += stillAlive ? 5 : (b.maxHits * 10);
+
+    // Resolve bounce direction
+    const overlapX = dx === 0 ? 0 : Math.abs(dx) < Math.abs(dy) ? 1 : 0;
+    if (overlapX) { vx = -vx; } else { vy = -vy; }
+    break; // one brick per frame
+  }
+
+  // Update particles
+  newParticles = newParticles
+    .map(p => ({ ...p, x: p.x + p.vx, y: p.y + p.vy, life: p.life - p.decay, vy: p.vy + 0.08 }))
+    .filter(p => p.life > 0);
+
+  const activeBricks = newBricks.filter(b => b.alive).length;
+  const phase = activeBricks === 0 ? 'won' : 'playing';
+
+  return {
+    ...state,
+    paddle,
+    ball: { ...ball, x, y, vx, vy },
+    bricks: newBricks,
+    score: newScore,
+    lives,
+    phase,
+    particles: newParticles,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rendering  (draw calls only — no state mutation)
+// ─────────────────────────────────────────────────────────────────────────────
+function drawFrame(ctx, state) {
+  const { paddle, ball, bricks, score, lives, phase, particles } = state;
+
+  // Background
+  ctx.clearRect(0, 0, W, H);
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0a0a1a');
+  bg.addColorStop(1, '#0d0d24');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid dots
+  ctx.fillStyle = 'rgba(255,255,255,0.025)';
+  for (let gx = 16; gx < W; gx += 32) {
+    for (let gy = 16; gy < H; gy += 32) {
+      ctx.beginPath(); ctx.arc(gx, gy, 1, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // Bricks
+  bricks.forEach(b => {
+    if (!b.alive) return;
+    const alpha = b.hits / b.maxHits;
+
+    // Shadow glow
+    ctx.shadowColor = b.fill;
+    ctx.shadowBlur = 6;
+
+    // Body
+    ctx.globalAlpha = 0.4 + alpha * 0.6;
+    const grad = ctx.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
+    grad.addColorStop(0, b.stroke);
+    grad.addColorStop(1, b.fill);
+    ctx.fillStyle = grad;
+    roundRect(ctx, b.x, b.y, b.w, b.h, 3);
+    ctx.fill();
+
+    // Border
+    ctx.globalAlpha = 0.8;
+    ctx.strokeStyle = b.stroke;
+    ctx.lineWidth = 1;
+    roundRect(ctx, b.x, b.y, b.w, b.h, 3);
+    ctx.stroke();
+
+    // Hit count pip
+    if (b.maxHits > 1) {
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 9px Courier New';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowBlur = 0;
+      ctx.fillText(b.hits, b.x + b.w / 2, b.y + b.h / 2);
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+  });
+
+  // Particles
+  particles.forEach(p => {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur = 4;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
+
+  // Paddle
+  const pGrad = ctx.createLinearGradient(paddle.x, paddle.y, paddle.x, paddle.y + paddle.h);
+  pGrad.addColorStop(0, '#a0c4ff');
+  pGrad.addColorStop(1, '#0a84ff');
+  ctx.fillStyle = pGrad;
+  ctx.shadowColor = '#0a84ff';
+  ctx.shadowBlur = 16;
+  roundRect(ctx, paddle.x, paddle.y, paddle.w, paddle.h, 6);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Ball
+  if (phase !== 'lost' && phase !== 'won') {
+    const ballGrad = ctx.createRadialGradient(
+      ball.x - ball.r * 0.3, ball.y - ball.r * 0.3, 1,
+      ball.x, ball.y, ball.r
+    );
+    ballGrad.addColorStop(0, '#ffffff');
+    ballGrad.addColorStop(0.5, '#a0c4ff');
+    ballGrad.addColorStop(1, '#0a84ff');
+    ctx.fillStyle = ballGrad;
+    ctx.shadowColor = '#60afff';
+    ctx.shadowBlur = 20;
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // HUD
+  drawHUD(ctx, score, lives);
+
+  // Overlay screens
+  if (phase === 'waiting') drawOverlay(ctx, 'READY', 'Click or press SPACE to launch');
+  if (phase === 'won')     drawOverlay(ctx, 'YOU WIN!', `Score: ${score} — press SPACE to play again`, '#ffd60a');
+  if (phase === 'lost')    drawOverlay(ctx, 'GAME OVER', `Final score: ${score} — press SPACE to restart`, '#ff2d55');
+}
+
+function drawHUD(ctx, score, lives) {
+  ctx.font = 'bold 13px Courier New';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillText(`SCORE  ${String(score).padStart(6, '0')}`, 12, 14);
+
+  ctx.textAlign = 'right';
+  for (let i = 0; i < 3; i++) {
+    ctx.globalAlpha = i < lives ? 1 : 0.18;
+    ctx.fillStyle = '#0a84ff';
+    ctx.shadowColor = '#0a84ff';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(W - 14 - i * 20, 20, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
+}
+
+function drawOverlay(ctx, title, sub, color = '#60afff') {
+  ctx.fillStyle = 'rgba(10,10,20,0.75)';
+  ctx.fillRect(0, H / 2 - 72, W, 144);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.font = 'bold 40px Courier New';
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 24;
+  ctx.fillText(title, W / 2, H / 2 - 20);
+
+  ctx.font = '13px Courier New';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.shadowBlur = 0;
+  ctx.fillText(sub, W / 2, H / 2 + 20);
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DxBallGame Component
+// ─────────────────────────────────────────────────────────────────────────────
+function DxBallGame() {
+  const canvasRef = React.useRef(null);
+  const stateRef  = React.useRef(buildInitialState());
+  const keysRef   = React.useRef({});
+  const rafRef    = React.useRef(null);
+  const [uiState, setUiState] = React.useState({ score: 0, lives: 3, phase: 'waiting' });
+
+  // ── Game loop ──────────────────────────────────────────────────────────────
+  React.useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    let lastUiScore = -1, lastUiLives = -1, lastUiPhase = '';
+
+    function loop() {
+      stateRef.current = updateGame(stateRef.current, keysRef.current);
+      drawFrame(ctx, stateRef.current);
+
+      // Sync React UI only when changed (score/lives display)
+      const { score, lives, phase } = stateRef.current;
+      if (score !== lastUiScore || lives !== lastUiLives || phase !== lastUiPhase) {
+        lastUiScore = score; lastUiLives = lives; lastUiPhase = phase;
+        setUiState({ score, lives, phase });
+      }
+      rafRef.current = requestAnimationFrame(loop);
+    }
+
+    rafRef.current = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, []);
+
+  // ── Input: keyboard ────────────────────────────────────────────────────────
+  React.useEffect(() => {
+    const onDown = e => {
+      keysRef.current[e.key] = true;
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        const { phase } = stateRef.current;
+        if (phase === 'waiting') {
+          stateRef.current = { ...stateRef.current, phase: 'playing' };
+        } else if (phase === 'won' || phase === 'lost') {
+          stateRef.current = buildInitialState();
+          stateRef.current.phase = 'waiting';
+        }
+      }
+      if (['ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
+    };
+    const onUp = e => { keysRef.current[e.key] = false; };
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    return () => { window.removeEventListener('keydown', onDown); window.removeEventListener('keyup', onUp); };
+  }, []);
+
+  // ── Input: mouse ───────────────────────────────────────────────────────────
+  const handleMouseMove = React.useCallback(e => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const mouseX = (e.clientX - rect.left) * scaleX;
+    const s = stateRef.current;
+    stateRef.current = {
+      ...s,
+      paddle: { ...s.paddle, x: Math.max(0, Math.min(W - s.paddle.w, mouseX - s.paddle.w / 2)) },
+    };
+  }, []);
+
+  const handleClick = React.useCallback(() => {
+    const { phase } = stateRef.current;
+    if (phase === 'waiting') {
+      stateRef.current = { ...stateRef.current, phase: 'playing' };
+    } else if (phase === 'won' || phase === 'lost') {
+      stateRef.current = buildInitialState();
+      stateRef.current.phase = 'waiting';
+    }
+  }, []);
+
+  // ── Touch support ──────────────────────────────────────────────────────────
+  const handleTouchMove = React.useCallback(e => {
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const touchX = (e.touches[0].clientX - rect.left) * scaleX;
+    const s = stateRef.current;
+    stateRef.current = {
+      ...s,
+      paddle: { ...s.paddle, x: Math.max(0, Math.min(W - s.paddle.w, touchX - s.paddle.w / 2)) },
+    };
+  }, []);
+
+  const handleTouchStart = React.useCallback(e => {
+    handleTouchMove(e);
+    handleClick();
+  }, [handleTouchMove, handleClick]);
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: '0px',
+      userSelect: 'none',
+    }}>
+      {/* Title bar */}
+      <div style={{
+        width: W,
+        maxWidth: '90vw',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '8px 16px',
+        background: 'rgba(255,255,255,0.04)',
+        borderRadius: '10px 10px 0 0',
+        border: '1px solid rgba(255,255,255,0.08)',
+        borderBottom: 'none',
+      }}>
+        <span style={{ color: '#0a84ff', fontFamily: 'Courier New', fontWeight: 'bold', fontSize: 15, letterSpacing: 3 }}>DX·BALL</span>
+        <span style={{ color: 'rgba(255,255,255,0.4)', fontFamily: 'Courier New', fontSize: 11 }}>
+          {uiState.phase === 'playing' ? '▶ PLAYING' : uiState.phase === 'won' ? '★ WINNER' : uiState.phase === 'lost' ? '✕ GAME OVER' : '● READY'}
+        </span>
+      </div>
+
+      {/* Canvas */}
+      <canvas
+        ref={canvasRef}
+        width={W}
+        height={H}
+        onMouseMove={handleMouseMove}
+        onClick={handleClick}
+        onTouchMove={handleTouchMove}
+        onTouchStart={handleTouchStart}
+        style={{
+          display: 'block',
+          maxWidth: '90vw',
+          aspectRatio: `${W} / ${H}`,
+          cursor: 'none',
+          border: '1px solid rgba(255,255,255,0.08)',
+          borderTop: 'none',
+          borderBottom: 'none',
+          borderRadius: 0,
+        }}
+      />
+
+      {/* Footer bar */}
+      <div style={{
+        width: W,
+        maxWidth: '90vw',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '7px 16px',
+        background: 'rgba(255,255,255,0.04)',
+        border: '1px solid rgba(255,255,255,0.08)',
+        borderTop: '1px solid rgba(255,255,255,0.05)',
+        borderRadius: '0 0 10px 10px',
+        gap: 24,
+      }}>
+        {[['←→ / mouse', 'move'], ['SPACE', 'launch'], ['click', 'launch']].map(([k, v]) => (
+          <span key={k} style={{ fontFamily: 'Courier New', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>
+            <span style={{ color: 'rgba(255,255,255,0.55)' }}>{k}</span> {v}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<DxBallGame />);
+</script>
+</body>
+</html>

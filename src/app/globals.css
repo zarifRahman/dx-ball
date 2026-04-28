@@ -1,0 +1,28 @@
+:root {
+  --foreground-rgb: 255, 255, 255;
+  --background-start: #0a0a14;
+  --background-end: #0d0d24;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: linear-gradient(
+    to bottom,
+    var(--background-start),
+    var(--background-end)
+  );
+  color: rgb(var(--foreground-rgb));
+  font-family: 'Courier New', monospace;
+  overflow: hidden; /* Prevent scrollbars */
+}
+
+/* Optional: Basic styles for focus rings if needed */
+/* :focus-visible {
+  outline: 2px solid blue;
+  outline-offset: 2px;
+} */
