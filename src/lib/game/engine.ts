@@ -172,7 +172,7 @@ export function updateGame(
   // Brick collisions & Particle generation
   let newBricks = bricks;
   let newScore = score;
-  let newParticles = [...particles];
+  const newParticles = [...particles];
 
   for (let i = 0; i < bricks.length; i++) {
     const b = bricks[i];
@@ -283,7 +283,7 @@ export function calculateNewBallVelocity(
   hitRatio: number,
 ): { vx: number; vy: number } {
   const newVx = hitRatio * INITIAL_BALL_SPEED * 1.2;
-  let newVy = -Math.sqrt(
+  const newVy = -Math.sqrt(
     Math.max(INITIAL_BALL_SPEED * INITIAL_BALL_SPEED - newVx * newVx, 4),
   );
 
