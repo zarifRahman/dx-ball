@@ -41,6 +41,7 @@ export const BRICK_TIERS = [
 export const GAME_PHASES = {
   WAITING: "waiting",
   PLAYING: "playing",
+  PAUSED: "paused",
   WON: "won",
   LOST: "lost",
 } as const;
@@ -60,3 +61,39 @@ export const PARTICLE_GRAVITY = 0.08;
 // Scoring
 export const SCORE_PER_HIT_ALIVE = 5;
 export const SCORE_PER_BRICK_DESTROYED = 10;
+
+// Combo system
+export const COMBO_WINDOW_MS = 500;  // ms between hits to chain combo
+export const COMBO_MAX = 4;
+
+// Powerup properties
+export const POWERUP_WIDTH = 26;
+export const POWERUP_HEIGHT = 14;
+export const POWERUP_FALL_SPEED = 2;
+export const POWERUP_BASE_CHANCE = 0.20; // 20% chance per destroyed brick
+
+// Powerup durations (in frames at ~60fps)
+export const POWERUP_WIDEN_FRAMES = 900;    // 15 seconds
+export const POWERUP_SLOW_FRAMES = 600;     // 10 seconds
+export const POWERUP_STICKY_FRAMES = 900;   // 15 seconds
+
+// Widen paddle multiplier
+export const POWERUP_WIDEN_MULTIPLIER = 1.5;
+
+// Slow ball multiplier
+export const POWERUP_SLOW_MULTIPLIER = 0.5;
+
+// Laser properties
+export const LASER_WIDTH = 3;
+export const LASER_HEIGHT = 12;
+export const LASER_SPEED = 10;
+
+// Level transition overlay duration (frames)
+export const LEVEL_TRANSITION_FRAMES = 90;
+
+// Ball speed scaling per level (+5% per level)
+export const BALL_SPEED_PER_LEVEL = 0.05;
+
+// Screen shake
+export const SHAKE_FRAMES = 6;        // frames shake lasts on brick destroy
+export const SHAKE_MAGNITUDE = 3;     // max pixel offset
