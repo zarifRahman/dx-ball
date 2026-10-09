@@ -50,8 +50,46 @@ import {
   Powerup,
   PowerupType,
   ScorePopup,
+  Difficulty,
 } from "./types";
 import { LEVELS, TOTAL_LEVELS } from "./levels";
+
+export const DIFFICULTY_CONFIG: Record<
+  Difficulty,
+  {
+    label: string;
+    ballSpeed: number;
+    lives: number;
+    paddleWidth: number;
+    powerupChance: number;
+    brickHitAdjustment: number;
+  }
+> = {
+  easy: {
+    label: "Easy",
+    ballSpeed: 0.85,
+    lives: 4,
+    paddleWidth: 1.15,
+    powerupChance: 0.06,
+    brickHitAdjustment: -1,
+  },
+  normal: {
+    label: "Normal",
+    ballSpeed: 1,
+    lives: 3,
+    paddleWidth: 1,
+    powerupChance: 0,
+    brickHitAdjustment: 0,
+  },
+  hard: {
+    label: "Hard",
+    ballSpeed: 1.08,
+    lives: 2,
+    paddleWidth: 0.9,
+    powerupChance: -0.04,
+    brickHitAdjustment: 1,
+  },
+};
 
 // --- Powerup type colours & labels ---
 
@@ -69,26 +107,28 @@ export const POWERUP_META: Record<
 
 // --- Brick layout builder ---
 
-function buildBricks(width: number, level: number): Brick[] {
+function buildBricks(width: number, level: number, difficulty: Difficulty): Brick[] {
   const bricks: Brick[] = [];
   const grid = LEVELS[(level - 1) % TOTAL_LEVELS];
   const cols = grid[0].length;
   const totalBricksWidth = cols * (BRICK_WIDTH + BRICK_PADDING) - BRICK_PADDING;
   const offsetX = (width - totalBricksWidth) / 2;
+  const hitAdjustment = DIFFICULTY_CONFIG[difficulty].brickHitAdjustment;
 
   for (let row = 0; row < grid.length; row++) {
     for (let col = 0; col < grid[row].length; col++) {
       const tierIndex = grid[row][col];
       if (tierIndex === 0) continue; // empty cell
       const tier = BRICK_TIERS[Math.min(tierIndex - 1, BRICK_TIERS.length - 1)];
+      const hits = Math.max(1, tier.hits + hitAdjustment);
       bricks.push({
         x: offsetX + col * (BRICK_WIDTH + BRICK_PADDING),
         y: BRICK_OFFSET_Y + row * (BRICK_HEIGHT + BRICK_PADDING),
         w: BRICK_WIDTH,
         h: BRICK_HEIGHT,
         alive: true,
-        hits: tier.hits,
-        maxHits: tier.hits,
+        hits,
+        maxHits: hits,
         fill: tier.fill,
         stroke: tier.stroke,
       });
@@ -99,17 +139,25 @@ function buildBricks(width: number, level: number): Brick[] {
 
 // --- Base speed for a given level ---
 
-function levelBaseSpeed(level: number, speedMultiplier = 1): number {
+function levelBaseSpeed(
+  level: number,
+  speedMultiplier = 1,
+  difficulty: Difficulty = "normal",
+): number {
   return (
-    INITIAL_BALL_SPEED * (1 + BALL_SPEED_PER_LEVEL * (level - 1)) * speedMultiplier
+    INITIAL_BALL_SPEED *
+    (1 + BALL_SPEED_PER_LEVEL * (level - 1)) *
+    speedMultiplier *
+    DIFFICULTY_CONFIG[difficulty].ballSpeed
   );
 }
 
 // --- Powerup drop chance for a given level ---
 
-function powerupDropChance(level: number): number {
+function powerupDropChance(level: number, difficulty: Difficulty): number {
   // 20% at level 1, -2.5% per level, floor at 5%
-  return Math.max(0.05, POWERUP_BASE_CHANCE - (level - 1) * 0.025);
+  const difficultyBonus = DIFFICULTY_CONFIG[difficulty].powerupChance;
+  return Math.max(0.05, POWERUP_BASE_CHANCE + difficultyBonus - (level - 1) * 0.025);
 }
 
 // --- Spawn a fresh ball above the paddle for a given level ---
@@ -137,20 +185,23 @@ export function buildInitialState(
   height: number,
   level = 1,
   speedMultiplier = 1,
+  difficulty: Difficulty = "normal",
 ): GameState {
   const paddleY = height - 48;
-  const speed = levelBaseSpeed(level, speedMultiplier);
+  const config = DIFFICULTY_CONFIG[difficulty];
+  const speed = levelBaseSpeed(level, speedMultiplier, difficulty);
+  const paddleWidth = PADDLE_WIDTH * config.paddleWidth;
   return {
     paddle: {
-      x: width / 2 - PADDLE_WIDTH / 2,
+      x: width / 2 - paddleWidth / 2,
       y: paddleY,
-      w: PADDLE_WIDTH,
+      w: paddleWidth,
       h: PADDLE_HEIGHT,
     },
     balls: [freshBall(width / 2, paddleY, speed, false)],
-    bricks: buildBricks(width, level),
+    bricks: buildBricks(width, level, difficulty),
     score: 0,
-    lives: 3,
+    lives: config.lives,
     phase: "waiting",
     particles: [],
     popups: [],
@@ -163,6 +214,7 @@ export function buildInitialState(
     comboCount: 1,
     baseSpeed: speed,
     speedMultiplier,
+    difficulty,
     stickyActive: false,
     shake: 0,
   };
@@ -177,16 +229,17 @@ function buildNextLevelState(
 ): GameState {
   const nextLevel = prev.level + 1;
   const paddleY = height - 48;
-  const speed = levelBaseSpeed(nextLevel, prev.speedMultiplier);
+  const paddleWidth = PADDLE_WIDTH * DIFFICULTY_CONFIG[prev.difficulty].paddleWidth;
+  const speed = levelBaseSpeed(nextLevel, prev.speedMultiplier, prev.difficulty);
   return {
     paddle: {
-      x: width / 2 - PADDLE_WIDTH / 2,
+      x: width / 2 - paddleWidth / 2,
       y: paddleY,
-      w: PADDLE_WIDTH,
+      w: paddleWidth,
       h: PADDLE_HEIGHT,
     },
     balls: [freshBall(width / 2, paddleY, speed, false)],
-    bricks: buildBricks(width, nextLevel),
+    bricks: buildBricks(width, nextLevel, prev.difficulty),
     score: prev.score,
     lives: prev.lives,
     phase: "levelTransition",
@@ -201,6 +254,7 @@ function buildNextLevelState(
     comboCount: 1,
     baseSpeed: speed,
     speedMultiplier: prev.speedMultiplier,
+    difficulty: prev.difficulty,
     stickyActive: false,
     shake: 0,
   };
@@ -272,8 +326,8 @@ const POWERUP_TYPES: PowerupType[] = [
   "extralife",
 ];
 
-function maybeDrop(b: Brick, level: number): Powerup | null {
-  if (Math.random() > powerupDropChance(level)) return null;
+function maybeDrop(b: Brick, level: number, difficulty: Difficulty): Powerup | null {
+  if (Math.random() > powerupDropChance(level, difficulty)) return null;
   const type = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
   return {
     x: b.x + b.w / 2 - POWERUP_WIDTH / 2,
@@ -291,10 +345,7 @@ function maybeDrop(b: Brick, level: number): Powerup | null {
 function applyPowerup(
   state: GameState,
   type: PowerupType,
-  width: number,
-  height: number,
 ): Partial<GameState> {
-  const paddleY = height - 48;
   const activePowerups = [...state.activePowerups];
 
   switch (type) {
@@ -377,7 +428,10 @@ function tickActivePowerups(
       // Powerup expired — revert
       switch (ap.type) {
         case "widen":
-          patch.paddle = { ...((patch.paddle ?? state.paddle) as Paddle), w: PADDLE_WIDTH };
+          patch.paddle = {
+            ...((patch.paddle ?? state.paddle) as Paddle),
+            w: PADDLE_WIDTH * DIFFICULTY_CONFIG[state.difficulty].paddleWidth,
+          };
           break;
         case "slow": {
           // Restore ball speed to base
@@ -438,6 +492,38 @@ const FIXED_STEP_MS = 1000 / 60;
 // fixed timestep.
 const POINTER_EASE_FACTOR = 0.35;
 
+function movePaddle(
+  paddle: Paddle,
+  balls: Ball[],
+  keys: Record<string, boolean>,
+  actionFlags: ActionFlags,
+  width: number,
+  dtScale: number,
+  carryBalls: boolean,
+): { paddle: Paddle; balls: Ball[] } {
+  const maxPaddleX = width - paddle.w;
+  let px = paddle.x;
+  if (actionFlags.pointerTargetX != null) {
+    const targetX = actionFlags.pointerTargetX - paddle.w / 2;
+    px += (targetX - px) * Math.min(1, POINTER_EASE_FACTOR * dtScale);
+  } else {
+    if (keys["ArrowLeft"]) px -= PADDLE_SPEED * dtScale;
+    if (keys["ArrowRight"]) px += PADDLE_SPEED * dtScale;
+  }
+  px = Math.max(0, Math.min(maxPaddleX, px));
+
+  const movedPaddle = { ...paddle, x: px };
+  const carriedBalls = carryBalls
+    ? balls.map((ball) => ({
+        ...ball,
+        x: movedPaddle.x + movedPaddle.w / 2,
+        y: movedPaddle.y - BALL_RADIUS - 2,
+      }))
+    : balls;
+
+  return { paddle: movedPaddle, balls: carriedBalls };
+}
+
 export function updateGame(
   state: GameState,
   keys: Record<string, boolean>,
@@ -455,9 +541,19 @@ export function updateGame(
     return { ...state, levelTransitionFrames: framesLeft };
   }
 
+  const dtScale = dt / FIXED_STEP_MS;
+
+  if (state.phase === "waiting") {
+    return {
+      ...state,
+      ...movePaddle(state.paddle, state.balls, keys, actionFlags, width, dtScale, true),
+    };
+  }
+
   if (state.phase !== "playing") return state;
 
-  let { paddle, balls, bricks, score, lives, particles, popups, powerups, lasers, level, baseSpeed, comboCount, lastHitTime, stickyActive } = state;
+  let { paddle, balls, stickyActive } = state;
+  const { bricks, score, lives, particles, popups, powerups, lasers, level, baseSpeed, comboCount, lastHitTime } = state;
   const { shake } = state;
 
   // Decay shake
@@ -466,7 +562,7 @@ export function updateGame(
 
   // --- Powerup timers ---
   const expiryPatch = tickActivePowerups(state);
-  let activePowerups = expiryPatch.activePowerups!;
+  const activePowerups = expiryPatch.activePowerups!;
   // Apply any reverts from expiry (paddle width, ball speed, sticky)
   paddle = (expiryPatch.paddle as Paddle | undefined) ?? paddle;
   balls = (expiryPatch.balls as Ball[] | undefined) ?? balls;
@@ -474,21 +570,7 @@ export function updateGame(
 
   // --- Paddle movement (single writer) ---
   // dtScale === 1 at the fixed 60fps step; keeps per-frame constants intact.
-  const dtScale = dt / FIXED_STEP_MS;
-  const maxPaddleX = width - paddle.w;
-  let px = paddle.x;
-  if (actionFlags.pointerTargetX != null) {
-    // Pointer (touch/mouse) drives the paddle: ease toward target centre so it
-    // glides rather than teleports. Clamped to playfield.
-    const targetX = actionFlags.pointerTargetX - paddle.w / 2;
-    px += (targetX - px) * Math.min(1, POINTER_EASE_FACTOR * dtScale);
-  } else {
-    // Fall back to keyboard movement when no pointer is active.
-    if (keys["ArrowLeft"]) px -= PADDLE_SPEED * dtScale;
-    if (keys["ArrowRight"]) px += PADDLE_SPEED * dtScale;
-  }
-  px = Math.max(0, Math.min(maxPaddleX, px));
-  paddle = { ...paddle, x: px };
+  ({ paddle, balls } = movePaddle(paddle, balls, keys, actionFlags, width, dtScale, false));
 
   // --- Lasers: fire on actionFlag ---
   const newLasers: Laser[] = [...lasers];
@@ -529,7 +611,7 @@ export function updateGame(
         newPopups.push({ x: b.x + b.w / 2, y: b.y + b.h / 2, text: `+${pts}`, life: 1.0, vy: -1.5 });
         spawnBrickParticles(newParticles, b);
         if (!stillAlive) {
-          const drop = maybeDrop(b, level);
+          const drop = maybeDrop(b, level, state.difficulty);
           if (drop) newPowerups.push(drop);
         }
         laserHit = true;
@@ -541,8 +623,7 @@ export function updateGame(
 
   // --- Move each ball, handle collisions ---
   const survivingBalls: Ball[] = [];
-  let ballsLost = 0;
-  let nowTime = Date.now();
+  const nowTime = Date.now();
   let newComboCount = comboCount;
   let newLastHitTime = lastHitTime;
 
@@ -572,7 +653,8 @@ export function updateGame(
       continue;
     }
 
-    let { x, y, vx, vy, r } = ballIn;
+    let { x, y, vx, vy } = ballIn;
+    const { r } = ballIn;
     x += vx;
     y += vy;
 
@@ -583,7 +665,6 @@ export function updateGame(
 
     // Ball lost
     if (y - r > height + 20) {
-      ballsLost++;
       continue;
     }
 
@@ -658,7 +739,7 @@ export function updateGame(
       });
 
       if (!stillAlive) {
-        const drop = maybeDrop(b, level);
+        const drop = maybeDrop(b, level, state.difficulty);
         if (drop) newPowerups.push(drop);
         // Trigger screen shake on brick destruction
         newShake = SHAKE_FRAMES;
@@ -736,8 +817,6 @@ export function updateGame(
           baseSpeed,
         },
         pu.type,
-        width,
-        height,
       );
       if (effect.paddle) currentPaddle = effect.paddle as Paddle;
       if (effect.balls) currentBalls = effect.balls as Ball[];
@@ -778,20 +857,9 @@ export function updateGame(
 
   // --- Check win condition ---
   const activeBrickCount = workingBricks.filter((b) => b.alive).length;
-  let phase: GameState["phase"] = activeBrickCount === 0 ? "won" : "playing";
+  const phase: GameState["phase"] = activeBrickCount === 0 ? "won" : "playing";
 
   // If won and there are more levels, advance instead
-  let finalLevel = level;
-  let finalBricks = workingBricks;
-  let finalBalls = currentBalls;
-  let finalPaddle = currentPaddle;
-  let finalActivePowerups = currentActivePowerups;
-  let finalStickyActive = currentStickyActive;
-  let finalLives = currentLives;
-  let finalLaserActive = survivingLasers;
-  let finalScore = newScore;
-  let finalTransitionFrames = state.levelTransitionFrames;
-
   if (phase === "won") {
     if (level < TOTAL_LEVELS) {
       // Advance to next level
@@ -825,22 +893,22 @@ export function updateGame(
 
   return {
     ...state,
-    paddle: finalPaddle,
-    balls: finalBalls,
-    bricks: finalBricks,
-    score: finalScore,
-    lives: finalLives,
+    paddle: currentPaddle,
+    balls: currentBalls,
+    bricks: workingBricks,
+    score: newScore,
+    lives: currentLives,
     phase,
     particles: updatedParticles,
     popups: updatedPopups,
     powerups: survivingPowerups,
-    lasers: finalLaserActive,
-    activePowerups: finalActivePowerups,
+    lasers: survivingLasers,
+    activePowerups: currentActivePowerups,
     comboCount: newComboCount,
     lastHitTime: newLastHitTime,
-    level: finalLevel,
-    levelTransitionFrames: finalTransitionFrames,
-    stickyActive: finalStickyActive,
+    level,
+    levelTransitionFrames: state.levelTransitionFrames,
+    stickyActive: currentStickyActive,
     shake: newShake,
   };
 }
@@ -851,7 +919,7 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-export function getBallAngle(ball: Ball, paddle: Paddle): number {
+export function getBallAngle(ball: Ball): number {
   return Math.atan2(ball.vy, ball.vx);
 }
 

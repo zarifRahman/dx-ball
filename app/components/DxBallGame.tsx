@@ -1,9 +1,9 @@
 'use client';
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { buildInitialState, updateGame } from '@/lib/game/engine';
+import { buildInitialState, DIFFICULTY_CONFIG, updateGame } from '@/lib/game/engine';
 import { drawFrame } from '@/lib/game/renderer';
-import { GameState, HighScoreEntry } from '@/lib/game/types';
+import { Difficulty, GameSpeed, GameState, HighScoreEntry, HighScoreTable } from '@/lib/game/types';
 import {
   initAudio,
   playHitPaddle,
@@ -22,62 +22,126 @@ import {
 
 const HIGH_SCORE_KEY = 'dxball_highscores';
 const SETTINGS_KEY = 'dxball_settings';
-const MAX_HIGH_SCORES = 5;
 
-function loadHighScores(): HighScoreEntry[] {
-  if (typeof window === 'undefined') return [];
+const SPEED_MULTIPLIERS: Record<GameSpeed, number> = {
+  '0.75': 0.75,
+  '1': 1,
+  '1.25': 1.25,
+};
+
+interface RunResult {
+  score: number;
+  best: number;
+  isNewRecord: boolean;
+  difficulty: Difficulty;
+  speed: GameSpeed;
+}
+
+function scoreKey(difficulty: Difficulty, speed: GameSpeed): string {
+  return `${difficulty}:${speed}`;
+}
+
+function isDifficulty(value: unknown): value is Difficulty {
+  return value === 'easy' || value === 'normal' || value === 'hard';
+}
+
+function isGameSpeed(value: unknown): value is GameSpeed {
+  return value === '0.75' || value === '1' || value === '1.25';
+}
+
+function loadHighScores(): HighScoreTable {
+  if (typeof window === 'undefined') return {};
   try {
     const raw = localStorage.getItem(HIGH_SCORE_KEY);
-    if (!raw) return [];
-    return JSON.parse(raw) as HighScoreEntry[];
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return {};
+
+    const safeScores: HighScoreTable = {};
+    Object.entries(parsed as Record<string, unknown>).forEach(([key, value]) => {
+      if (!value || typeof value !== 'object') return;
+      const [difficulty, speed] = key.split(':');
+      const entry = value as Partial<HighScoreEntry>;
+      if (!isDifficulty(difficulty) || !isGameSpeed(speed)) return;
+      if (typeof entry.score !== 'number' || !Number.isFinite(entry.score) || entry.score < 0) return;
+      safeScores[key] = {
+        score: Math.floor(entry.score),
+        date: typeof entry.date === 'string' ? entry.date : new Date().toISOString(),
+      };
+    });
+    return safeScores;
   } catch {
-    return [];
+    return {};
   }
 }
 
-function saveHighScore(score: number): HighScoreEntry[] {
-  if (typeof window === 'undefined') return [];
+function saveHighScore(score: number, difficulty: Difficulty, speed: GameSpeed): RunResult {
+  const key = scoreKey(difficulty, speed);
+  const currentScores = loadHighScores();
+  const previousBest = currentScores[key]?.score ?? 0;
+  const isNewRecord = score > previousBest;
+
   try {
-    const scores = loadHighScores();
-    const entry: HighScoreEntry = {
-      score,
-      date: new Date().toLocaleDateString(),
-    };
-    scores.push(entry);
-    scores.sort((a, b) => b.score - a.score);
-    const top = scores.slice(0, MAX_HIGH_SCORES);
-    localStorage.setItem(HIGH_SCORE_KEY, JSON.stringify(top));
-    return top;
+    if (typeof window !== 'undefined' && isNewRecord) {
+      localStorage.setItem(
+        HIGH_SCORE_KEY,
+        JSON.stringify({
+          ...currentScores,
+          [key]: { score, date: new Date().toISOString() },
+        }),
+      );
+    }
   } catch {
-    return [];
+    // localStorage unavailable - keep the run result in memory only.
   }
+
+  return { score, best: Math.max(score, previousBest), isNewRecord, difficulty, speed };
 }
 
 // --- Settings localStorage helpers ---
-
-type GameSpeed = 'slow' | 'normal' | 'fast';
-
-// Maps the user-facing speed setting to a ball-speed multiplier.
-const SPEED_MULTIPLIERS: Record<GameSpeed, number> = {
-  slow: 0.75,
-  normal: 1.0,
-  fast: 1.3,
-};
 
 interface Settings {
   volume: number;       // 0..1
   haptics: boolean;
   speed: GameSpeed;
+  difficulty: Difficulty;
 }
 
-const DEFAULT_SETTINGS: Settings = { volume: 0.7, haptics: true, speed: 'normal' };
+const DEFAULT_SETTINGS: Settings = {
+  volume: 0.7,
+  haptics: true,
+  speed: '1',
+  difficulty: 'normal',
+};
+
+function normalizeSpeed(value: unknown): GameSpeed {
+  if (isGameSpeed(value)) return value;
+  if (value === 'slow') return '0.75';
+  if (value === 'normal') return '1';
+  if (value === 'fast') return '1.25';
+  return DEFAULT_SETTINGS.speed;
+}
 
 function loadSettings(): Settings {
   if (typeof window === 'undefined') return DEFAULT_SETTINGS;
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return DEFAULT_SETTINGS;
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } as Settings;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return DEFAULT_SETTINGS;
+    const maybeSettings = parsed as Partial<Settings>;
+    return {
+      volume: typeof maybeSettings.volume === 'number'
+        ? Math.min(1, Math.max(0, maybeSettings.volume))
+        : DEFAULT_SETTINGS.volume,
+      haptics: typeof maybeSettings.haptics === 'boolean'
+        ? maybeSettings.haptics
+        : DEFAULT_SETTINGS.haptics,
+      speed: normalizeSpeed(maybeSettings.speed),
+      difficulty: isDifficulty(maybeSettings.difficulty)
+        ? maybeSettings.difficulty
+        : DEFAULT_SETTINGS.difficulty,
+    };
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -106,6 +170,7 @@ function vibrate(ms: number, hapticsEnabled: boolean): void {
 type MenuView = 'main' | 'highscores' | 'settings';
 
 export default function DxBallGame() {
+  const gameAreaRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<GameState | null>(null);
   const keysRef = useRef<Record<string, boolean>>({});
@@ -138,18 +203,20 @@ export default function DxBallGame() {
 
   // Menu / overlay React state
   const [menuView, setMenuView] = useState<MenuView>('main');
-  // Lazy initializers load from localStorage without a render-causing effect.
-  // Guards inside each helper handle SSR (typeof window === 'undefined').
-  const [highScores, setHighScores] = useState<HighScoreEntry[]>(loadHighScores);
-  const [settings, setSettings] = useState<Settings>(loadSettings);
+  const [highScores, setHighScores] = useState<HighScoreTable>({});
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [runResult, setRunResult] = useState<RunResult | null>(null);
 
-  // Sync the settingsRef and audio volume after mount (external side-effects only,
-  // no setState — so no cascading renders; the linter is happy with this pattern).
+  // Load browser-only localStorage data after hydration so server/client text matches.
   useEffect(() => {
-    settingsRef.current = settings;
-    setVolume(settings.volume);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // run once on mount; settings is stable from lazy initializer
+    const savedSettings = loadSettings();
+    settingsRef.current = savedSettings;
+    // Browser storage must load after hydration to keep SSR/client text identical.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSettings(savedSettings);
+    setHighScores(loadHighScores());
+    setVolume(savedSettings.volume);
+  }, []);
 
   // --- Initialization and Resize Handling ---
   useEffect(() => {
@@ -163,14 +230,19 @@ export default function DxBallGame() {
       setDimensions({ width: gameWidth, height: gameHeight, screenWidth });
 
       if (!stateRef.current) {
-        const s = buildInitialState(gameWidth, gameHeight, 1);
+        const { speed, difficulty } = settingsRef.current;
+        const s = buildInitialState(gameWidth, gameHeight, 1, SPEED_MULTIPLIERS[speed], difficulty);
         // Start on the menu, not the waiting screen
         stateRef.current = { ...s, phase: 'menu' };
       } else {
         if (stateRef.current.phase === 'waiting' || stateRef.current.phase === 'menu') {
           const currentLevel = stateRef.current.level;
           const currentPhase = stateRef.current.phase;
-          stateRef.current = { ...buildInitialState(gameWidth, gameHeight, currentLevel), phase: currentPhase };
+          const { speed, difficulty } = settingsRef.current;
+          stateRef.current = {
+            ...buildInitialState(gameWidth, gameHeight, currentLevel, SPEED_MULTIPLIERS[speed], difficulty),
+            phase: currentPhase,
+          };
         } else {
           stateRef.current.paddle.x = Math.min(
             stateRef.current.paddle.x,
@@ -190,8 +262,12 @@ export default function DxBallGame() {
   const handleGameEnd = useCallback((score: number) => {
     if (scoreSavedRef.current) return;
     scoreSavedRef.current = true;
-    const updated = saveHighScore(score);
-    setHighScores(updated);
+    const { difficulty, speed } = settingsRef.current;
+    const result = saveHighScore(score, difficulty, speed);
+    setRunResult(result);
+    if (result.isNewRecord) {
+      setHighScores(loadHighScores());
+    }
   }, []);
 
   // --- Settings update helpers ---
@@ -223,12 +299,38 @@ export default function DxBallGame() {
     });
   }, []);
 
+  const updateDifficulty = useCallback((difficulty: Difficulty) => {
+    setSettings((prev) => {
+      const next = { ...prev, difficulty };
+      settingsRef.current = next;
+      persistSettings(next);
+      return next;
+    });
+  }, []);
+
+  const resetBestScores = useCallback(() => {
+    try {
+      localStorage.removeItem(HIGH_SCORE_KEY);
+    } catch {
+      // localStorage unavailable - nothing to clear.
+    }
+    setHighScores({});
+    setRunResult(null);
+  }, []);
+
   // --- Start game from menu ---
   const startGame = useCallback(() => {
     if (!stateRef.current || dimensions.width === 0) return;
     scoreSavedRef.current = false;
+    setRunResult(null);
     const speedMultiplier = SPEED_MULTIPLIERS[settingsRef.current.speed];
-    const fresh = buildInitialState(dimensions.width, dimensions.height, 1, speedMultiplier);
+    const fresh = buildInitialState(
+      dimensions.width,
+      dimensions.height,
+      1,
+      speedMultiplier,
+      settingsRef.current.difficulty,
+    );
     stateRef.current = { ...fresh, phase: 'waiting' };
     pointerTargetXRef.current = null;
     prevPhaseRef.current = 'waiting';
@@ -427,8 +529,7 @@ export default function DxBallGame() {
               playLaserShoot();
             }
           } else if (phase === 'won' || phase === 'lost') {
-            // Return to menu instead of restarting directly
-            stateRef.current = { ...stateRef.current, phase: 'menu' };
+            startGame();
           }
         }
       }
@@ -465,19 +566,61 @@ export default function DxBallGame() {
     };
   }, [dimensions, startGame]);
 
-  const handleMouseMove = useCallback((e: MouseEvent) => {
+  const canDrivePaddle = useCallback(() => {
+    return (
+      stateRef.current?.phase === 'playing' ||
+      stateRef.current?.phase === 'waiting'
+    );
+  }, []);
+
+  const setPointerTargetFromClientX = useCallback((clientX: number) => {
+    const gameArea = gameAreaRef.current;
     const canvas = canvasRef.current;
-    if (!canvas || !stateRef.current || stateRef.current.phase !== 'playing') return;
+    if (
+      !gameArea ||
+      !canvas ||
+      !canDrivePaddle()
+    ) return;
 
     const rect = canvas.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right) return;
+
     // Set the desired paddle CENTRE; the engine eases toward it (single writer).
-    pointerTargetXRef.current = e.clientX - rect.left;
+    pointerTargetXRef.current = clientX - rect.left;
+  }, [canDrivePaddle]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    setPointerTargetFromClientX(e.clientX);
+  }, [setPointerTargetFromClientX]);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!canDrivePaddle()) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setPointerTargetFromClientX(e.clientX);
+  }, [canDrivePaddle, setPointerTargetFromClientX]);
+
+  const handlePointerEnd = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    if (e.pointerType !== 'mouse') {
+      pointerTargetXRef.current = null;
+    }
+  }, []);
+
+  const handlePointerLeave = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.hasPointerCapture(e.pointerId)) {
+      pointerTargetXRef.current = null;
+    }
   }, []);
 
   const handleClick = useCallback(() => {
     initAudio();
     if (!stateRef.current) return;
     const { phase } = stateRef.current;
+    if (phase === 'menu') {
+      return;
+    }
     if (phase === 'waiting') {
       stateRef.current = { ...stateRef.current, phase: 'playing' };
     } else if (phase === 'playing') {
@@ -497,55 +640,22 @@ export default function DxBallGame() {
     // won/lost clicks handled by React buttons in overlay, not canvas click
   }, []);
 
-  const handleTouchMove = useCallback((e: TouchEvent) => {
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (!canDrivePaddle()) return;
+    const canvas = canvasRef.current;
+    const paddle = stateRef.current?.paddle;
+    if (!canvas || !paddle) return;
+
+    const horizontalDelta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : 0;
+    if (horizontalDelta === 0) return;
+
     e.preventDefault();
-    const canvas = canvasRef.current;
-    if (!canvas || !stateRef.current || stateRef.current.phase !== 'playing') return;
-
-    const rect = canvas.getBoundingClientRect();
-    // Set the desired paddle CENTRE; the engine eases toward it (single writer).
-    pointerTargetXRef.current = e.touches[0].clientX - rect.left;
-  }, []);
-
-  const handleTouchStart = useCallback((e: TouchEvent) => {
-    handleTouchMove(e);
-    handleClick();
-  }, [handleTouchMove, handleClick]);
-
-  const handleTouchEnd = useCallback(() => {
-    // Release the paddle so keyboard control can resume.
-    pointerTargetXRef.current = null;
-  }, []);
-
-  const handleMouseLeave = useCallback(() => {
-    // Pointer left the canvas — stop driving the paddle.
-    pointerTargetXRef.current = null;
-  }, []);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseleave', handleMouseLeave);
-    canvas.addEventListener('click', handleClick);
-    canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
-    canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
-    canvas.addEventListener('touchend', handleTouchEnd);
-    canvas.addEventListener('touchcancel', handleTouchEnd);
-
-    return () => {
-      if (canvas) {
-        canvas.removeEventListener('mousemove', handleMouseMove);
-        canvas.removeEventListener('mouseleave', handleMouseLeave);
-        canvas.removeEventListener('click', handleClick);
-        canvas.removeEventListener('touchmove', handleTouchMove);
-        canvas.removeEventListener('touchstart', handleTouchStart);
-        canvas.removeEventListener('touchend', handleTouchEnd);
-        canvas.removeEventListener('touchcancel', handleTouchEnd);
-      }
-    };
-  }, [handleMouseMove, handleMouseLeave, handleClick, handleTouchMove, handleTouchStart, handleTouchEnd]);
+    const currentCenter = pointerTargetXRef.current ?? paddle.x + paddle.w / 2;
+    pointerTargetXRef.current = Math.max(
+      0,
+      Math.min(canvas.getBoundingClientRect().width, currentCenter + horizontalDelta),
+    );
+  }, [canDrivePaddle]);
 
   const phaseLabel = () => {
     switch (uiState.phase) {
@@ -564,12 +674,22 @@ export default function DxBallGame() {
 
   // Whether the menu overlay should be visible
   const showMenu = uiState.phase === 'menu';
+  const showGameOver = uiState.phase === 'won' || uiState.phase === 'lost';
+  const selectedBest = highScores[scoreKey(settings.difficulty, settings.speed)]?.score ?? 0;
 
   return (
     <div className="fixed inset-0 bg-neutral-950 flex justify-center items-center overflow-hidden touch-none select-none">
       <div
+        ref={gameAreaRef}
         className="relative bg-black shadow-[0_0_100px_rgba(0,0,0,0.5)] overflow-hidden"
         style={{ width: dimensions.width, height: dimensions.height }}
+        onPointerMove={handlePointerMove}
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerEnd}
+        onPointerCancel={handlePointerEnd}
+        onPointerLeave={handlePointerLeave}
+        onClick={handleClick}
+        onWheel={handleWheel}
       >
         <canvas
           ref={canvasRef}
@@ -599,6 +719,9 @@ export default function DxBallGame() {
               </div>
               <div className="text-[10px] font-mono text-white/40 bg-black/40 backdrop-blur-sm px-2 py-1 rounded border border-white/5 uppercase tracking-tighter">
                 {phaseLabel()}
+              </div>
+              <div className="text-[10px] font-mono text-white/45 bg-black/40 backdrop-blur-sm px-2 py-1 rounded border border-white/5 uppercase tracking-tighter">
+                {DIFFICULTY_CONFIG[settings.difficulty].label} / {settings.speed}x
               </div>
               {/* Mobile pause button */}
               {(uiState.phase === 'playing' || uiState.phase === 'paused') && (
@@ -637,11 +760,30 @@ export default function DxBallGame() {
           </div>
         )}
 
+        {showGameOver && runResult && (
+          <GameOverPanel
+            won={uiState.phase === 'won'}
+            result={runResult}
+            onReplay={() => { initAudio(); startGame(); }}
+            onMenu={() => {
+              if (!stateRef.current) return;
+              stateRef.current = { ...stateRef.current, phase: 'menu' };
+              setMenuView('main');
+            }}
+          />
+        )}
+
         {/* --- Menu Overlay --- */}
         {showMenu && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0a0a1a]/90 backdrop-blur-sm">
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center overflow-y-auto bg-[#0a0a1a]/90 px-4 py-6 backdrop-blur-sm"
+            onClick={(e) => e.stopPropagation()}
+          >
             {menuView === 'main' && (
               <MainMenu
+                bestScore={selectedBest}
+                difficulty={settings.difficulty}
+                speed={settings.speed}
                 onPlay={() => { initAudio(); startGame(); }}
                 onHighScores={() => setMenuView('highscores')}
                 onSettings={() => setMenuView('settings')}
@@ -650,6 +792,8 @@ export default function DxBallGame() {
             {menuView === 'highscores' && (
               <HighScoresPanel
                 scores={highScores}
+                selectedDifficulty={settings.difficulty}
+                selectedSpeed={settings.speed}
                 onBack={() => setMenuView('main')}
               />
             )}
@@ -659,6 +803,8 @@ export default function DxBallGame() {
                 onVolumeChange={updateVolume}
                 onHapticsChange={updateHaptics}
                 onSpeedChange={updateSpeed}
+                onDifficultyChange={updateDifficulty}
+                onResetScores={resetBestScores}
                 onBack={() => setMenuView('main')}
               />
             )}
@@ -672,10 +818,16 @@ export default function DxBallGame() {
 // --- Sub-components ---
 
 function MainMenu({
+  bestScore,
+  difficulty,
+  speed,
   onPlay,
   onHighScores,
   onSettings,
 }: {
+  bestScore: number;
+  difficulty: Difficulty;
+  speed: GameSpeed;
   onPlay: () => void;
   onHighScores: () => void;
   onSettings: () => void;
@@ -695,6 +847,18 @@ function MainMenu({
         <p className="text-white/30 font-mono text-xs tracking-widest mt-2 uppercase">
           Brick Breaker
         </p>
+      </div>
+
+      <div className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3">
+        <div className="flex items-center justify-between">
+          <span className="font-mono text-[10px] text-white/40 uppercase tracking-widest">Best</span>
+          <span className="font-mono text-[10px] text-blue-300/80 uppercase tracking-widest">
+            {DIFFICULTY_CONFIG[difficulty].label} / {speed}x
+          </span>
+        </div>
+        <div className="mt-1 font-mono font-bold text-2xl text-yellow-300 tabular-nums">
+          {bestScore.toString().padStart(6, '0')}
+        </div>
       </div>
 
       {/* Buttons */}
@@ -742,44 +906,135 @@ function MenuButton({
   );
 }
 
+function GameOverPanel({
+  won,
+  result,
+  onReplay,
+  onMenu,
+}: {
+  won: boolean;
+  result: RunResult;
+  onReplay: () => void;
+  onMenu: () => void;
+}) {
+  return (
+    <div
+      className="absolute inset-0 z-10 flex items-center justify-center bg-[#0a0a1a]/70 backdrop-blur-[2px] px-6"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="w-full max-w-xs rounded-lg border border-white/10 bg-black/70 p-5 shadow-[0_0_40px_rgba(0,0,0,0.5)]">
+        <div className="text-center">
+          <h2
+            className="font-mono font-bold text-3xl uppercase tracking-widest"
+            style={{
+              color: won ? '#ffd60a' : '#ff2d55',
+              textShadow: `0 0 22px ${won ? '#ffd60a' : '#ff2d55'}`,
+            }}
+          >
+            {won ? 'You Win' : 'Game Over'}
+          </h2>
+          {result.isNewRecord && (
+            <p className="mt-2 font-mono text-xs font-bold uppercase tracking-widest text-yellow-300">
+              New Personal Best
+            </p>
+          )}
+        </div>
+
+        <div className="mt-5 grid grid-cols-2 gap-2">
+          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+            <div className="font-mono text-[10px] uppercase tracking-widest text-white/40">Score</div>
+            <div className="mt-1 font-mono text-xl font-bold tabular-nums text-white">
+              {result.score.toString().padStart(6, '0')}
+            </div>
+          </div>
+          <div className="rounded-lg border border-yellow-300/30 bg-yellow-950/20 p-3">
+            <div className="font-mono text-[10px] uppercase tracking-widest text-yellow-200/60">Best</div>
+            <div className="mt-1 font-mono text-xl font-bold tabular-nums text-yellow-200">
+              {result.best.toString().padStart(6, '0')}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-3 rounded-lg border border-blue-400/20 bg-blue-950/20 px-3 py-2 text-center font-mono text-[11px] uppercase tracking-widest text-blue-200/80">
+          {DIFFICULTY_CONFIG[result.difficulty].label} / {result.speed}x
+        </div>
+
+        <div className="mt-5 grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            onClick={onMenu}
+            className="min-h-[44px] rounded-lg border border-white/10 bg-white/5 font-mono text-xs font-bold uppercase tracking-widest text-white/60 transition-all hover:bg-white/10 active:scale-95"
+          >
+            Menu
+          </button>
+          <button
+            type="button"
+            onClick={onReplay}
+            className="min-h-[44px] rounded-lg border border-blue-400/60 bg-blue-600/80 font-mono text-xs font-bold uppercase tracking-widest text-white shadow-[0_0_20px_rgba(10,132,255,0.35)] transition-all hover:bg-blue-500/80 active:scale-95"
+          >
+            Replay
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function HighScoresPanel({
   scores,
+  selectedDifficulty,
+  selectedSpeed,
   onBack,
 }: {
-  scores: HighScoreEntry[];
+  scores: HighScoreTable;
+  selectedDifficulty: Difficulty;
+  selectedSpeed: GameSpeed;
   onBack: () => void;
 }) {
+  const entries = DIFFICULTY_OPTIONS.flatMap((difficulty) =>
+    SPEED_OPTIONS.map((speed) => ({
+      difficulty: difficulty.value,
+      speed: speed.value,
+      entry: scores[scoreKey(difficulty.value, speed.value)],
+    })),
+  );
+
   return (
     <div className="flex flex-col items-center gap-6 px-6 w-full max-w-xs">
       <h2 className="font-mono font-bold text-2xl tracking-widest text-white/90 uppercase">
-        High Scores
+        Best Scores
       </h2>
 
       <div className="w-full">
-        {scores.length === 0 ? (
+        {Object.keys(scores).length === 0 ? (
           <p className="text-white/30 font-mono text-sm text-center py-6">
             No scores yet. Play a game!
           </p>
         ) : (
-          <ol className="flex flex-col gap-2">
-            {scores.map((entry, i) => (
-              <li
-                key={i}
-                className="flex items-center justify-between bg-white/5 border border-white/10 rounded-lg px-4 py-2"
+          <div className="grid grid-cols-3 gap-2">
+            {entries.map(({ difficulty, speed, entry }) => {
+              const active = difficulty === selectedDifficulty && speed === selectedSpeed;
+              return (
+              <div
+                key={`${difficulty}:${speed}`}
+                className={[
+                  'bg-white/5 border rounded-lg px-3 py-2 min-h-[70px]',
+                  active ? 'border-blue-400/60 shadow-[0_0_16px_rgba(10,132,255,0.18)]' : 'border-white/10',
+                ].join(' ')}
               >
-                <span className="font-mono text-white/40 text-xs w-5">{i + 1}.</span>
-                <span
-                  className="font-mono font-bold text-lg flex-1 text-right"
-                  style={{ color: i === 0 ? '#ffd60a' : 'rgba(255,255,255,0.85)' }}
-                >
-                  {entry.score.toString().padStart(6, '0')}
-                </span>
-                <span className="font-mono text-white/30 text-xs ml-4 w-24 text-right">
-                  {entry.date}
-                </span>
-              </li>
-            ))}
-          </ol>
+                <div className="font-mono text-[9px] text-white/40 uppercase tracking-widest">
+                  {DIFFICULTY_CONFIG[difficulty].label}
+                </div>
+                <div className="font-mono text-[9px] text-blue-300/70 uppercase tracking-widest">
+                  {speed}x
+                </div>
+                <div className="mt-1 font-mono font-bold text-sm text-white tabular-nums">
+                  {(entry?.score ?? 0).toString().padStart(6, '0')}
+                </div>
+              </div>
+              );
+            })}
+          </div>
         )}
       </div>
 
@@ -788,10 +1043,16 @@ function HighScoresPanel({
   );
 }
 
+const DIFFICULTY_OPTIONS: { value: Difficulty; label: string; note: string }[] = [
+  { value: 'easy', label: 'Easy', note: '4 lives' },
+  { value: 'normal', label: 'Normal', note: 'balanced' },
+  { value: 'hard', label: 'Hard', note: '2 lives' },
+];
+
 const SPEED_OPTIONS: { value: GameSpeed; label: string }[] = [
-  { value: 'slow', label: 'Slow' },
-  { value: 'normal', label: 'Normal' },
-  { value: 'fast', label: 'Fast' },
+  { value: '0.75', label: '0.75x' },
+  { value: '1', label: '1x' },
+  { value: '1.25', label: '1.25x' },
 ];
 
 function SettingsPanel({
@@ -799,14 +1060,20 @@ function SettingsPanel({
   onVolumeChange,
   onHapticsChange,
   onSpeedChange,
+  onDifficultyChange,
+  onResetScores,
   onBack,
 }: {
   settings: Settings;
   onVolumeChange: (v: number) => void;
   onHapticsChange: (enabled: boolean) => void;
   onSpeedChange: (speed: GameSpeed) => void;
+  onDifficultyChange: (difficulty: Difficulty) => void;
+  onResetScores: () => void;
   onBack: () => void;
 }) {
+  const [confirmReset, setConfirmReset] = useState(false);
+
   return (
     <div className="flex flex-col items-center gap-6 px-6 w-full max-w-xs">
       <h2 className="font-mono font-bold text-2xl tracking-widest text-white/90 uppercase">
@@ -814,6 +1081,83 @@ function SettingsPanel({
       </h2>
 
       <div className="flex flex-col gap-5 w-full">
+        {/* Difficulty segmented control */}
+        <div className="flex flex-col gap-2">
+          <span
+            id="difficulty-label"
+            className="font-mono text-xs text-white/60 uppercase tracking-widest"
+          >
+            Difficulty
+          </span>
+          <div
+            role="radiogroup"
+            aria-labelledby="difficulty-label"
+            className="grid grid-cols-3 gap-2"
+          >
+            {DIFFICULTY_OPTIONS.map((opt) => {
+              const active = settings.difficulty === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => onDifficultyChange(opt.value)}
+                  className={[
+                    'min-h-[58px] px-2 py-2 rounded-lg font-mono uppercase border transition-all',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                    active
+                      ? 'bg-blue-600/60 border-blue-400/50 text-white'
+                      : 'bg-white/5 border-white/10 text-white/40 hover:bg-white/10 hover:text-white/70',
+                  ].join(' ')}
+                >
+                  <span className="block text-xs font-bold tracking-widest">{opt.label}</span>
+                  <span className="block mt-1 text-[9px] tracking-normal normal-case text-white/45">
+                    {opt.note}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Game speed segmented control */}
+        <div className="flex flex-col gap-2">
+          <span
+            id="speed-label"
+            className="font-mono text-xs text-white/60 uppercase tracking-widest"
+          >
+            Game Speed
+          </span>
+          <div
+            role="radiogroup"
+            aria-labelledby="speed-label"
+            className="flex gap-2"
+          >
+            {SPEED_OPTIONS.map((opt) => {
+              const active = settings.speed === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => onSpeedChange(opt.value)}
+                  className={[
+                    'flex-1 min-h-[44px] px-2 py-2 rounded-lg font-mono text-xs uppercase tracking-widest border transition-all',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                    active
+                      ? 'bg-blue-600/60 border-blue-400/50 text-white'
+                      : 'bg-white/5 border-white/10 text-white/40 hover:bg-white/10 hover:text-white/70',
+                  ].join(' ')}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* Volume slider */}
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
@@ -852,41 +1196,41 @@ function SettingsPanel({
           </button>
         </div>
 
-        {/* Game speed segmented control */}
+        {/* Reset scores */}
         <div className="flex flex-col gap-2">
-          <span
-            id="speed-label"
-            className="font-mono text-xs text-white/60 uppercase tracking-widest"
+          <button
+            type="button"
+            onClick={() => setConfirmReset(true)}
+            className="w-full min-h-[44px] rounded-lg font-mono font-bold text-xs uppercase tracking-widest border border-red-400/30 bg-red-950/30 text-red-200/80 hover:bg-red-900/40 active:scale-95 transition-all"
           >
-            Game Speed
-          </span>
-          <div
-            role="radiogroup"
-            aria-labelledby="speed-label"
-            className="flex gap-2"
-          >
-            {SPEED_OPTIONS.map((opt) => {
-              const active = settings.speed === opt.value;
-              return (
+            Reset Best Scores
+          </button>
+          {confirmReset && (
+            <div className="bg-red-950/35 border border-red-400/30 rounded-lg p-3">
+              <p className="font-mono text-[11px] leading-5 text-red-100/80">
+                Delete every saved personal best on this device?
+              </p>
+              <div className="mt-3 grid grid-cols-2 gap-2">
                 <button
-                  key={opt.value}
                   type="button"
-                  role="radio"
-                  aria-checked={active}
-                  onClick={() => onSpeedChange(opt.value)}
-                  className={[
-                    'flex-1 px-2 py-1.5 rounded-lg font-mono text-xs uppercase tracking-widest border transition-all',
-                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
-                    active
-                      ? 'bg-blue-600/60 border-blue-400/50 text-white'
-                      : 'bg-white/5 border-white/10 text-white/40 hover:bg-white/10 hover:text-white/70',
-                  ].join(' ')}
+                  onClick={() => setConfirmReset(false)}
+                  className="min-h-[40px] rounded-lg border border-white/10 bg-white/5 font-mono text-[11px] uppercase tracking-widest text-white/60"
                 >
-                  {opt.label}
+                  Cancel
                 </button>
-              );
-            })}
-          </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onResetScores();
+                    setConfirmReset(false);
+                  }}
+                  className="min-h-[40px] rounded-lg border border-red-300/50 bg-red-600/70 font-mono text-[11px] font-bold uppercase tracking-widest text-white"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Controls reference */}

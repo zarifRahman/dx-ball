@@ -12,8 +12,8 @@ export const PADDLE_SPEED = 60;
 
 // Ball properties
 export const BALL_RADIUS = 8;
-export const INITIAL_BALL_SPEED = 25;
-export const MAX_BALL_SPEED = 70;
+export const INITIAL_BALL_SPEED = 8;
+export const MAX_BALL_SPEED = 22;
 
 // Brick properties
 export const BRICK_COLS = 10;
@@ -91,8 +91,8 @@ export const LASER_SPEED = 10;
 // Level transition overlay duration (frames)
 export const LEVEL_TRANSITION_FRAMES = 90;
 
-// Ball speed scaling per level (+5% per level)
-export const BALL_SPEED_PER_LEVEL = 0.05;
+// Ball speed scaling per level (+3.5% per level)
+export const BALL_SPEED_PER_LEVEL = 0.035;
 
 // Screen shake
 export const SHAKE_FRAMES = 6;        // frames shake lasts on brick destroy

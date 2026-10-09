@@ -13,7 +13,7 @@ export interface Circle {
   r: number;
 }
 
-export interface Paddle extends Rect {}
+export type Paddle = Rect;
 
 export interface Ball extends Circle {
   vx: number;
@@ -56,6 +56,9 @@ export type PowerupType =
   | "slow"
   | "extralife";
 
+export type Difficulty = "easy" | "normal" | "hard";
+export type GameSpeed = "0.75" | "1" | "1.25";
+
 export interface Powerup extends Rect {
   vy: number;
   type: PowerupType;
@@ -89,16 +92,19 @@ export interface GameState {
   lastHitTime: number;              // Date.now() of last brick hit
   comboCount: number;               // current combo multiplier (1 = no combo)
   baseSpeed: number;                // current ball base speed (scales with level + speedMultiplier)
-  speedMultiplier: number;          // user-selected global speed scaler (slow/normal/fast)
+  speedMultiplier: number;          // user-selected global speed scaler
+  difficulty: Difficulty;           // user-selected gameplay difficulty
   stickyActive: boolean;            // whether sticky paddle is currently active
   shake: number;                    // frames of screen shake remaining (decays to 0)
 }
 
-// High score entry stored in localStorage
+// Personal best entry stored in localStorage for one difficulty/speed pair
 export interface HighScoreEntry {
   score: number;
   date: string; // ISO date string
 }
+
+export type HighScoreTable = Record<string, HighScoreEntry>;
 
 export interface GameContext {
   state: GameState;
