@@ -99,6 +99,7 @@ export interface GameState {
   fireballActive: boolean;          // whether ball burns through bricks (DX-Ball fireball)
   shake: number;                    // frames of screen shake remaining (decays to 0)
   runStats: RunStats;               // cumulative stats for the current run (reset on new game)
+  isDaily: boolean;                 // daily-challenge run: single board, no level advance
 }
 
 // Live stats tracked across one run (carried over between levels, reset on new game)

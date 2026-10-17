@@ -3,7 +3,31 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { buildInitialState, DIFFICULTY_CONFIG, updateGame } from '@/lib/game/engine';
 import { drawFrame } from '@/lib/game/renderer';
-import { Difficulty, GameSpeed, GameState, HighScoreEntry, HighScoreTable } from '@/lib/game/types';
+import {
+  Difficulty,
+  GameSpeed,
+  GameState,
+  LeaderboardTable,
+  LeaderboardEntry,
+  RunStats,
+  AchievementId,
+} from '@/lib/game/types';
+import {
+  LEADERBOARD_KEY,
+  scoreKey,
+  loadLeaderboard,
+  saveLeaderboard,
+  bestScore,
+  qualifies,
+  insertScore,
+} from '@/lib/game/leaderboard';
+import {
+  evaluate,
+  loadUnlocked,
+  saveUnlocked,
+  achievementById,
+} from '@/lib/game/achievements';
+import { todayStr, dailyKey, dailyChallenge } from '@/lib/game/daily';
 import {
   initAudio,
   playHitPaddle,
@@ -18,9 +42,8 @@ import {
   setVolume,
 } from '@/lib/game/audio';
 
-// --- High Score localStorage helpers ---
+// --- Settings localStorage helpers ---
 
-const HIGH_SCORE_KEY = 'dxball_highscores';
 const SETTINGS_KEY = 'dxball_settings';
 
 const SPEED_MULTIPLIERS: Record<GameSpeed, number> = {
@@ -29,18 +52,6 @@ const SPEED_MULTIPLIERS: Record<GameSpeed, number> = {
   '1.25': 1.25,
 };
 
-interface RunResult {
-  score: number;
-  best: number;
-  isNewRecord: boolean;
-  difficulty: Difficulty;
-  speed: GameSpeed;
-}
-
-function scoreKey(difficulty: Difficulty, speed: GameSpeed): string {
-  return `${difficulty}:${speed}`;
-}
-
 function isDifficulty(value: unknown): value is Difficulty {
   return value === 'easy' || value === 'normal' || value === 'hard';
 }
@@ -48,57 +59,6 @@ function isDifficulty(value: unknown): value is Difficulty {
 function isGameSpeed(value: unknown): value is GameSpeed {
   return value === '0.75' || value === '1' || value === '1.25';
 }
-
-function loadHighScores(): HighScoreTable {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = localStorage.getItem(HIGH_SCORE_KEY);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return {};
-
-    const safeScores: HighScoreTable = {};
-    Object.entries(parsed as Record<string, unknown>).forEach(([key, value]) => {
-      if (!value || typeof value !== 'object') return;
-      const [difficulty, speed] = key.split(':');
-      const entry = value as Partial<HighScoreEntry>;
-      if (!isDifficulty(difficulty) || !isGameSpeed(speed)) return;
-      if (typeof entry.score !== 'number' || !Number.isFinite(entry.score) || entry.score < 0) return;
-      safeScores[key] = {
-        score: Math.floor(entry.score),
-        date: typeof entry.date === 'string' ? entry.date : new Date().toISOString(),
-      };
-    });
-    return safeScores;
-  } catch {
-    return {};
-  }
-}
-
-function saveHighScore(score: number, difficulty: Difficulty, speed: GameSpeed): RunResult {
-  const key = scoreKey(difficulty, speed);
-  const currentScores = loadHighScores();
-  const previousBest = currentScores[key]?.score ?? 0;
-  const isNewRecord = score > previousBest;
-
-  try {
-    if (typeof window !== 'undefined' && isNewRecord) {
-      localStorage.setItem(
-        HIGH_SCORE_KEY,
-        JSON.stringify({
-          ...currentScores,
-          [key]: { score, date: new Date().toISOString() },
-        }),
-      );
-    }
-  } catch {
-    // localStorage unavailable - keep the run result in memory only.
-  }
-
-  return { score, best: Math.max(score, previousBest), isNewRecord, difficulty, speed };
-}
-
-// --- Settings localStorage helpers ---
 
 interface Settings {
   volume: number;       // 0..1
@@ -169,6 +129,31 @@ function vibrate(ms: number, hapticsEnabled: boolean): void {
 
 type MenuView = 'main' | 'highscores' | 'settings';
 
+// End-screen summary captured at game end (stateRef isn't reactive).
+interface EndInfo {
+  won: boolean;
+  score: number;
+  best: number;
+  isNewRecord: boolean;
+  isDaily: boolean;
+  difficulty: Difficulty;
+  speed: GameSpeed;
+  stats: RunStats;
+}
+
+// A qualifying score awaiting a name before it's saved to the leaderboard.
+interface PendingScore {
+  key: string;
+  score: number;
+}
+
+// A transient achievement toast.
+interface ToastItem {
+  id: AchievementId;
+  label: string;
+  desc: string;
+}
+
 export default function DxBallGame() {
   const gameAreaRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -203,9 +188,15 @@ export default function DxBallGame() {
 
   // Menu / overlay React state
   const [menuView, setMenuView] = useState<MenuView>('main');
-  const [highScores, setHighScores] = useState<HighScoreTable>({});
+  const [highScores, setHighScores] = useState<LeaderboardTable>({});
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [runResult, setRunResult] = useState<RunResult | null>(null);
+  // End-of-run result shown on the won/lost overlay (ref isn't reactive — capture here).
+  const [endInfo, setEndInfo] = useState<EndInfo | null>(null);
+  // Name-entry overlay for a qualifying score (null = not qualifying / already saved).
+  const [pending, setPending] = useState<PendingScore | null>(null);
+  const [nameInput, setNameInput] = useState('');
+  // Transient achievement toasts.
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   // Load browser-only localStorage data after hydration so server/client text matches.
   useEffect(() => {
@@ -214,7 +205,7 @@ export default function DxBallGame() {
     // Browser storage must load after hydration to keep SSR/client text identical.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSettings(savedSettings);
-    setHighScores(loadHighScores());
+    setHighScores(loadLeaderboard());
     setVolume(savedSettings.volume);
   }, []);
 
@@ -258,17 +249,69 @@ export default function DxBallGame() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // --- Save high score when game ends ---
-  const handleGameEnd = useCallback((score: number) => {
+  // --- Achievement toast queue (auto-dismiss after 4s) ---
+  const pushToast = useCallback((item: ToastItem) => {
+    setToasts((prev) => [...prev, item]);
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== item.id));
+    }, 4000);
+  }, []);
+
+  // --- Save score, celebrate, record achievements when a game ends ---
+  const handleGameEnd = useCallback((score: number, won: boolean) => {
     if (scoreSavedRef.current) return;
     scoreSavedRef.current = true;
+
+    const live = stateRef.current;
+    if (!live) return;
     const { difficulty, speed } = settingsRef.current;
-    const result = saveHighScore(score, difficulty, speed);
-    setRunResult(result);
-    if (result.isNewRecord) {
-      setHighScores(loadHighScores());
+    const isDaily = live.isDaily;
+    const stats = live.runStats;
+    const key = isDaily ? dailyKey(todayStr()) : scoreKey(difficulty, speed);
+
+    const table = loadLeaderboard();
+    const isNewRecord = qualifies(table, key, score);
+
+    setEndInfo({
+      won,
+      score,
+      best: Math.max(score, bestScore(table, key)),
+      isNewRecord,
+      isDaily,
+      difficulty,
+      speed,
+      stats,
+    });
+
+    // Qualifying score → prompt for a name before saving.
+    if (isNewRecord) {
+      setPending({ key, score });
+      setNameInput('');
     }
-  }, []);
+
+    // Achievements: evaluate against freshly-loaded unlocked set, persist, toast.
+    const unlocked = loadUnlocked();
+    const earned = evaluate(stats, { score, clearedLevel: won, isDaily }, unlocked);
+    if (earned.length > 0) {
+      const next = new Set(unlocked);
+      earned.forEach((id) => next.add(id));
+      saveUnlocked(next);
+      earned.forEach((id) => {
+        const a = achievementById(id);
+        if (a) pushToast({ id, label: a.label, desc: a.desc });
+      });
+    }
+  }, [pushToast]);
+
+  // --- Submit a name for the pending qualifying score ---
+  const submitName = useCallback(() => {
+    if (!pending) return;
+    const table = insertScore(loadLeaderboard(), pending.key, nameInput, pending.score);
+    saveLeaderboard(table);
+    setHighScores(table);
+    setPending(null);
+    setNameInput('');
+  }, [pending, nameInput]);
 
   // --- Settings update helpers ---
   const updateVolume = useCallback((v: number) => {
@@ -310,19 +353,30 @@ export default function DxBallGame() {
 
   const resetBestScores = useCallback(() => {
     try {
-      localStorage.removeItem(HIGH_SCORE_KEY);
+      localStorage.removeItem(LEADERBOARD_KEY);
     } catch {
       // localStorage unavailable - nothing to clear.
     }
     setHighScores({});
-    setRunResult(null);
+    setEndInfo(null);
+    setPending(null);
   }, []);
 
   // --- Start game from menu ---
+  // Shared reset of the per-run refs after a fresh state is installed.
+  const resetRunRefs = useCallback(() => {
+    pointerTargetXRef.current = null;
+    prevPhaseRef.current = 'waiting';
+    prevScoreRef.current = 0;
+    prevLivesRef.current = 3;
+    prevLevelRef.current = 1;
+  }, []);
+
   const startGame = useCallback(() => {
     if (!stateRef.current || dimensions.width === 0) return;
     scoreSavedRef.current = false;
-    setRunResult(null);
+    setEndInfo(null);
+    setPending(null);
     const speedMultiplier = SPEED_MULTIPLIERS[settingsRef.current.speed];
     const fresh = buildInitialState(
       dimensions.width,
@@ -332,12 +386,28 @@ export default function DxBallGame() {
       settingsRef.current.difficulty,
     );
     stateRef.current = { ...fresh, phase: 'waiting' };
-    pointerTargetXRef.current = null;
-    prevPhaseRef.current = 'waiting';
-    prevScoreRef.current = 0;
-    prevLivesRef.current = 3;
-    prevLevelRef.current = 1;
-  }, [dimensions]);
+    resetRunRefs();
+  }, [dimensions, resetRunRefs]);
+
+  // --- Start the deterministic daily challenge ---
+  const startDaily = useCallback(() => {
+    if (!stateRef.current || dimensions.width === 0) return;
+    scoreSavedRef.current = false;
+    setEndInfo(null);
+    setPending(null);
+    const challenge = dailyChallenge();
+    const speedMultiplier = SPEED_MULTIPLIERS[settingsRef.current.speed];
+    const fresh = buildInitialState(
+      dimensions.width,
+      dimensions.height,
+      1,
+      speedMultiplier,
+      challenge.difficulty,
+      { gridOverride: challenge.grid, isDaily: true },
+    );
+    stateRef.current = { ...fresh, phase: 'waiting' };
+    resetRunRefs();
+  }, [dimensions, resetRunRefs]);
 
   // --- Game Loop ---
   useEffect(() => {
@@ -416,8 +486,8 @@ export default function DxBallGame() {
         // --- Audio: phase transitions ---
         const prevPhase = prevPhaseRef.current;
         if (phase !== prevPhase) {
-          if (phase === 'won') { playWin(); handleGameEnd(score); }
-          if (phase === 'lost') { playGameOver(); handleGameEnd(score); }
+          if (phase === 'won') { playWin(); handleGameEnd(score, true); }
+          if (phase === 'lost') { playGameOver(); handleGameEnd(score, false); }
           if (phase === 'waiting' && prevPhase === 'playing') playBallLost();
           if (phase === 'levelTransition') playLevelUp();
           prevPhaseRef.current = phase;
@@ -675,7 +745,7 @@ export default function DxBallGame() {
   // Whether the menu overlay should be visible
   const showMenu = uiState.phase === 'menu';
   const showGameOver = uiState.phase === 'won' || uiState.phase === 'lost';
-  const selectedBest = highScores[scoreKey(settings.difficulty, settings.speed)]?.score ?? 0;
+  const selectedBest = bestScore(highScores, scoreKey(settings.difficulty, settings.speed));
 
   return (
     <div className="fixed inset-0 bg-neutral-950 flex justify-center items-center overflow-hidden touch-none select-none">
@@ -760,10 +830,13 @@ export default function DxBallGame() {
           </div>
         )}
 
-        {showGameOver && runResult && (
+        {showGameOver && endInfo && (
           <GameOverPanel
-            won={uiState.phase === 'won'}
-            result={runResult}
+            info={endInfo}
+            pending={pending}
+            nameInput={nameInput}
+            onNameChange={setNameInput}
+            onNameSubmit={submitName}
             onReplay={() => { initAudio(); startGame(); }}
             onMenu={() => {
               if (!stateRef.current) return;
@@ -771,6 +844,27 @@ export default function DxBallGame() {
               setMenuView('main');
             }}
           />
+        )}
+
+        {/* --- Achievement toasts --- */}
+        {toasts.length > 0 && (
+          <div
+            className="pointer-events-none absolute inset-x-0 top-4 z-20 flex flex-col items-center gap-2 px-4"
+            role="status"
+            aria-live="polite"
+          >
+            {toasts.map((t) => (
+              <div
+                key={t.id}
+                className="w-full max-w-xs rounded-lg border border-yellow-300/40 bg-black/85 px-4 py-2 shadow-[0_0_24px_rgba(255,214,10,0.25)]"
+              >
+                <div className="font-mono text-[10px] font-bold uppercase tracking-widest text-yellow-300">
+                  Achievement — {t.label}
+                </div>
+                <div className="mt-0.5 font-mono text-[11px] text-white/60">{t.desc}</div>
+              </div>
+            ))}
+          </div>
         )}
 
         {/* --- Menu Overlay --- */}
@@ -785,6 +879,7 @@ export default function DxBallGame() {
                 difficulty={settings.difficulty}
                 speed={settings.speed}
                 onPlay={() => { initAudio(); startGame(); }}
+                onDaily={() => { initAudio(); startDaily(); }}
                 onHighScores={() => setMenuView('highscores')}
                 onSettings={() => setMenuView('settings')}
               />
@@ -822,6 +917,7 @@ function MainMenu({
   difficulty,
   speed,
   onPlay,
+  onDaily,
   onHighScores,
   onSettings,
 }: {
@@ -829,6 +925,7 @@ function MainMenu({
   difficulty: Difficulty;
   speed: GameSpeed;
   onPlay: () => void;
+  onDaily: () => void;
   onHighScores: () => void;
   onSettings: () => void;
 }) {
@@ -865,6 +962,9 @@ function MainMenu({
       <div className="flex flex-col gap-3 w-full">
         <MenuButton onClick={onPlay} primary>
           Play
+        </MenuButton>
+        <MenuButton onClick={onDaily}>
+          Daily Challenge
         </MenuButton>
         <MenuButton onClick={onHighScores}>
           High Scores
@@ -907,19 +1007,33 @@ function MenuButton({
 }
 
 function GameOverPanel({
-  won,
-  result,
+  info,
+  pending,
+  nameInput,
+  onNameChange,
+  onNameSubmit,
   onReplay,
   onMenu,
 }: {
-  won: boolean;
-  result: RunResult;
+  info: EndInfo;
+  pending: PendingScore | null;
+  nameInput: string;
+  onNameChange: (v: string) => void;
+  onNameSubmit: () => void;
   onReplay: () => void;
   onMenu: () => void;
 }) {
+  const { won, score, best, isNewRecord, isDaily, difficulty, speed, stats } = info;
+  const awaitingName = pending !== null;
+  const statRows: [string, number][] = [
+    ['Bricks', stats.bricksDestroyed],
+    ['Best Combo', stats.bestCombo],
+    ['Level', stats.levelReached],
+    ['Power-ups', stats.powerupsCollected],
+  ];
   return (
     <div
-      className="absolute inset-0 z-10 flex items-center justify-center bg-[#0a0a1a]/70 backdrop-blur-[2px] px-6"
+      className="absolute inset-0 z-10 flex items-center justify-center overflow-y-auto bg-[#0a0a1a]/70 backdrop-blur-[2px] px-6 py-6"
       onClick={(e) => e.stopPropagation()}
     >
       <div className="w-full max-w-xs rounded-lg border border-white/10 bg-black/70 p-5 shadow-[0_0_40px_rgba(0,0,0,0.5)]">
@@ -933,9 +1047,9 @@ function GameOverPanel({
           >
             {won ? 'You Win' : 'Game Over'}
           </h2>
-          {result.isNewRecord && (
-            <p className="mt-2 font-mono text-xs font-bold uppercase tracking-widest text-yellow-300">
-              New Personal Best
+          {isNewRecord && (
+            <p className="dxball-flash mt-2 font-mono text-sm font-bold uppercase tracking-widest text-yellow-300">
+              ★ New High Score! ★
             </p>
           )}
         </div>
@@ -944,20 +1058,63 @@ function GameOverPanel({
           <div className="rounded-lg border border-white/10 bg-white/5 p-3">
             <div className="font-mono text-[10px] uppercase tracking-widest text-white/40">Score</div>
             <div className="mt-1 font-mono text-xl font-bold tabular-nums text-white">
-              {result.score.toString().padStart(6, '0')}
+              {score.toString().padStart(6, '0')}
             </div>
           </div>
           <div className="rounded-lg border border-yellow-300/30 bg-yellow-950/20 p-3">
             <div className="font-mono text-[10px] uppercase tracking-widest text-yellow-200/60">Best</div>
             <div className="mt-1 font-mono text-xl font-bold tabular-nums text-yellow-200">
-              {result.best.toString().padStart(6, '0')}
+              {best.toString().padStart(6, '0')}
             </div>
           </div>
         </div>
 
+        {/* Run stats */}
+        <dl className="mt-3 grid grid-cols-2 gap-2">
+          {statRows.map(([label, value]) => (
+            <div key={label} className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+              <dt className="font-mono text-[9px] uppercase tracking-widest text-white/40">{label}</dt>
+              <dd className="mt-0.5 font-mono text-sm font-bold tabular-nums text-white/90">{value}</dd>
+            </div>
+          ))}
+        </dl>
+
         <div className="mt-3 rounded-lg border border-blue-400/20 bg-blue-950/20 px-3 py-2 text-center font-mono text-[11px] uppercase tracking-widest text-blue-200/80">
-          {DIFFICULTY_CONFIG[result.difficulty].label} / {result.speed}x
+          {isDaily ? `Daily / ${DIFFICULTY_CONFIG[difficulty].label}` : `${DIFFICULTY_CONFIG[difficulty].label} / ${speed}x`}
         </div>
+
+        {/* Name entry for a qualifying score */}
+        {awaitingName && (
+          <form
+            className="mt-4 flex flex-col gap-2"
+            onSubmit={(e) => { e.preventDefault(); onNameSubmit(); }}
+          >
+            <label
+              htmlFor="dxball-name"
+              className="font-mono text-[10px] uppercase tracking-widest text-yellow-200/70"
+            >
+              Enter your name for the leaderboard
+            </label>
+            <div className="flex gap-2">
+              <input
+                id="dxball-name"
+                type="text"
+                maxLength={12}
+                autoFocus
+                value={nameInput}
+                onChange={(e) => onNameChange(e.target.value)}
+                placeholder="Player"
+                className="min-h-[44px] flex-1 rounded-lg border border-white/15 bg-white/5 px-3 font-mono text-sm text-white placeholder:text-white/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-300/70"
+              />
+              <button
+                type="submit"
+                className="min-h-[44px] rounded-lg border border-yellow-300/50 bg-yellow-500/20 px-4 font-mono text-xs font-bold uppercase tracking-widest text-yellow-100 transition-all hover:bg-yellow-500/30 active:scale-95"
+              >
+                Save
+              </button>
+            </div>
+          </form>
+        )}
 
         <div className="mt-5 grid grid-cols-2 gap-3">
           <button
@@ -980,63 +1137,79 @@ function GameOverPanel({
   );
 }
 
+function LeaderboardList({ rows }: { rows: LeaderboardEntry[] }) {
+  if (rows.length === 0) {
+    return (
+      <p className="py-4 text-center font-mono text-xs text-white/30">
+        No scores yet.
+      </p>
+    );
+  }
+  return (
+    <ol className="flex flex-col gap-1">
+      {rows.map((row, i) => (
+        <li
+          key={`${row.name}:${row.date}:${i}`}
+          className="flex items-center gap-3 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5"
+        >
+          <span className="w-5 shrink-0 font-mono text-[11px] font-bold tabular-nums text-blue-300/80">
+            {i + 1}
+          </span>
+          <span className="flex-1 truncate font-mono text-xs text-white/80">{row.name}</span>
+          <span className="shrink-0 font-mono text-xs font-bold tabular-nums text-yellow-200">
+            {row.score.toString().padStart(6, '0')}
+          </span>
+          <span className="w-[72px] shrink-0 text-right font-mono text-[9px] tabular-nums text-white/30">
+            {row.date.slice(0, 10)}
+          </span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 function HighScoresPanel({
   scores,
   selectedDifficulty,
   selectedSpeed,
   onBack,
 }: {
-  scores: HighScoreTable;
+  scores: LeaderboardTable;
   selectedDifficulty: Difficulty;
   selectedSpeed: GameSpeed;
   onBack: () => void;
 }) {
-  const entries = DIFFICULTY_OPTIONS.flatMap((difficulty) =>
-    SPEED_OPTIONS.map((speed) => ({
-      difficulty: difficulty.value,
-      speed: speed.value,
-      entry: scores[scoreKey(difficulty.value, speed.value)],
-    })),
-  );
+  const selectedKey = scoreKey(selectedDifficulty, selectedSpeed);
+  const selectedRows = scores[selectedKey] ?? [];
+  const dKey = dailyKey(todayStr());
+  const dailyRows = scores[dKey] ?? [];
 
   return (
-    <div className="flex flex-col items-center gap-6 px-6 w-full max-w-xs">
-      <h2 className="font-mono font-bold text-2xl tracking-widest text-white/90 uppercase">
-        Best Scores
+    <div className="flex w-full max-w-xs flex-col items-center gap-6 px-6">
+      <h2 className="font-mono text-2xl font-bold uppercase tracking-widest text-white/90">
+        Leaderboard
       </h2>
 
       <div className="w-full">
-        {Object.keys(scores).length === 0 ? (
-          <p className="text-white/30 font-mono text-sm text-center py-6">
-            No scores yet. Play a game!
-          </p>
-        ) : (
-          <div className="grid grid-cols-3 gap-2">
-            {entries.map(({ difficulty, speed, entry }) => {
-              const active = difficulty === selectedDifficulty && speed === selectedSpeed;
-              return (
-              <div
-                key={`${difficulty}:${speed}`}
-                className={[
-                  'bg-white/5 border rounded-lg px-3 py-2 min-h-[70px]',
-                  active ? 'border-blue-400/60 shadow-[0_0_16px_rgba(10,132,255,0.18)]' : 'border-white/10',
-                ].join(' ')}
-              >
-                <div className="font-mono text-[9px] text-white/40 uppercase tracking-widest">
-                  {DIFFICULTY_CONFIG[difficulty].label}
-                </div>
-                <div className="font-mono text-[9px] text-blue-300/70 uppercase tracking-widest">
-                  {speed}x
-                </div>
-                <div className="mt-1 font-mono font-bold text-sm text-white tabular-nums">
-                  {(entry?.score ?? 0).toString().padStart(6, '0')}
-                </div>
-              </div>
-              );
-            })}
-          </div>
-        )}
+        <div className="mb-2 flex items-center justify-between">
+          <span className="font-mono text-[10px] uppercase tracking-widest text-white/40">
+            {DIFFICULTY_CONFIG[selectedDifficulty].label} / {selectedSpeed}x
+          </span>
+          <span className="font-mono text-[10px] uppercase tracking-widest text-white/25">
+            Top {Math.max(selectedRows.length, 0) ? selectedRows.length : 10}
+          </span>
+        </div>
+        <LeaderboardList rows={selectedRows} />
       </div>
+
+      {dailyRows.length > 0 && (
+        <div className="w-full">
+          <div className="mb-2 font-mono text-[10px] uppercase tracking-widest text-yellow-200/60">
+            Daily — {todayStr()}
+          </div>
+          <LeaderboardList rows={dailyRows} />
+        </div>
+      )}
 
       <MenuButton onClick={onBack}>Back</MenuButton>
     </div>
