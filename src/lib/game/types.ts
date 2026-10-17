@@ -54,7 +54,8 @@ export type PowerupType =
   | "sticky"
   | "laser"
   | "slow"
-  | "extralife";
+  | "extralife"
+  | "fireball";
 
 export type Difficulty = "easy" | "normal" | "hard";
 export type GameSpeed = "0.75" | "1" | "1.25";
@@ -95,6 +96,7 @@ export interface GameState {
   speedMultiplier: number;          // user-selected global speed scaler
   difficulty: Difficulty;           // user-selected gameplay difficulty
   stickyActive: boolean;            // whether sticky paddle is currently active
+  fireballActive: boolean;          // whether ball burns through bricks (DX-Ball fireball)
   shake: number;                    // frames of screen shake remaining (decays to 0)
 }
 
