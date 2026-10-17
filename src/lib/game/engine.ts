@@ -30,6 +30,7 @@ import {
   POWERUP_WIDEN_FRAMES,
   POWERUP_SLOW_FRAMES,
   POWERUP_STICKY_FRAMES,
+  POWERUP_FIREBALL_FRAMES,
   POWERUP_WIDEN_MULTIPLIER,
   POWERUP_SLOW_MULTIPLIER,
   LASER_WIDTH,
@@ -103,6 +104,7 @@ export const POWERUP_META: Record<
   laser:     { color: "#ff3b30", label: "L" },
   slow:      { color: "#0a84ff", label: "B" },
   extralife: { color: "#ff2d55", label: "+" },
+  fireball:  { color: "#ff6a00", label: "F" },
 };
 
 // --- Brick layout builder ---
@@ -216,6 +218,7 @@ export function buildInitialState(
     speedMultiplier,
     difficulty,
     stickyActive: false,
+    fireballActive: false,
     shake: 0,
   };
 }
@@ -256,6 +259,7 @@ function buildNextLevelState(
     speedMultiplier: prev.speedMultiplier,
     difficulty: prev.difficulty,
     stickyActive: false,
+    fireballActive: false,
     shake: 0,
   };
 }
@@ -324,6 +328,7 @@ const POWERUP_TYPES: PowerupType[] = [
   "laser",
   "slow",
   "extralife",
+  "fireball",
 ];
 
 function maybeDrop(b: Brick, level: number, difficulty: Difficulty): Powerup | null {
@@ -386,6 +391,12 @@ function applyPowerup(
       const filtered = activePowerups.filter((a) => a.type !== "laser");
       filtered.push({ type: "laser", framesLeft: POWERUP_STICKY_FRAMES });
       return { activePowerups: filtered };
+    }
+
+    case "fireball": {
+      const filtered = activePowerups.filter((a) => a.type !== "fireball");
+      filtered.push({ type: "fireball", framesLeft: POWERUP_FIREBALL_FRAMES });
+      return { activePowerups: filtered, fireballActive: true };
     }
 
     case "multiball": {
@@ -454,6 +465,9 @@ function tickActivePowerups(
           break;
         case "laser":
           // No object to revert, timer just expires
+          break;
+        case "fireball":
+          patch.fireballActive = false;
           break;
       }
     }
@@ -553,7 +567,7 @@ export function updateGame(
   if (state.phase !== "playing") return state;
 
   let { paddle, balls, stickyActive } = state;
-  const { bricks, score, lives, particles, popups, powerups, lasers, level, baseSpeed, comboCount, lastHitTime } = state;
+  const { bricks, score, lives, particles, popups, powerups, lasers, level, baseSpeed, comboCount, lastHitTime, fireballActive } = state;
   const { shake } = state;
 
   // Decay shake
@@ -704,7 +718,8 @@ export function updateGame(
       if (!hit) continue;
 
       const newHits = b.hits - 1;
-      const stillAlive = newHits > 0;
+      // Fireball destroys any brick in one pass regardless of hit points
+      const stillAlive = fireballActive ? false : newHits > 0;
 
       spawnBrickParticles(newParticles, b);
 
@@ -744,6 +759,9 @@ export function updateGame(
         // Trigger screen shake on brick destruction
         newShake = SHAKE_FRAMES;
       }
+
+      // Fireball plows straight through — no bounce, keeps destroying bricks this frame
+      if (fireballActive) continue;
 
       // Resolve bounce direction
       const overlapX = Math.abs(dx);

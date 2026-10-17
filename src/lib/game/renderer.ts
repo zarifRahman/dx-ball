@@ -75,6 +75,7 @@ export function drawFrame(renderContext: RenderContext, state: GameState) {
     levelTransitionFrames,
     comboCount,
     shake,
+    fireballActive,
   } = state;
 
   // --- Screen shake transform ---
@@ -257,10 +258,10 @@ export function drawFrame(renderContext: RenderContext, state: GameState) {
         ball.r,
       );
       ballGrad.addColorStop(0, "#ffffff");
-      ballGrad.addColorStop(0.5, "#a0c4ff");
-      ballGrad.addColorStop(1, "#0a84ff");
+      ballGrad.addColorStop(0.5, fireballActive ? "#ffd27f" : "#a0c4ff");
+      ballGrad.addColorStop(1, fireballActive ? "#ff6a00" : "#0a84ff");
       ctx.fillStyle = ballGrad;
-      ctx.shadowColor = "#60afff";
+      ctx.shadowColor = fireballActive ? "#ff8c2b" : "#60afff";
       ctx.shadowBlur = 20;
       ctx.beginPath();
       ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
