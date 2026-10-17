@@ -98,15 +98,50 @@ export interface GameState {
   stickyActive: boolean;            // whether sticky paddle is currently active
   fireballActive: boolean;          // whether ball burns through bricks (DX-Ball fireball)
   shake: number;                    // frames of screen shake remaining (decays to 0)
+  runStats: RunStats;               // cumulative stats for the current run (reset on new game)
+}
+
+// Live stats tracked across one run (carried over between levels, reset on new game)
+export interface RunStats {
+  bricksDestroyed: number;
+  bestCombo: number;
+  powerupsCollected: number;
+  levelReached: number;             // highest level reached this run
+  fireballKills: number;            // bricks destroyed while fireball was active (cumulative this run)
+  deaths: number;                   // balls lost this run
 }
 
 // Personal best entry stored in localStorage for one difficulty/speed pair
+// (legacy single-best shape — kept for migration into LeaderboardEntry[])
 export interface HighScoreEntry {
   score: number;
   date: string; // ISO date string
 }
 
 export type HighScoreTable = Record<string, HighScoreEntry>;
+
+// One named row in the leaderboard for a given mode key
+export interface LeaderboardEntry {
+  name: string;
+  score: number;
+  date: string; // ISO date string
+}
+
+// key = `${difficulty}:${speed}` or `daily:YYYY-MM-DD`; value = top-N rows, sorted desc
+export type LeaderboardTable = Record<string, LeaderboardEntry[]>;
+
+export type AchievementId =
+  | "combo4"
+  | "noDeathClear"
+  | "score10k"
+  | "fireballFrenzy"
+  | "dailyDone";
+
+export interface Achievement {
+  id: AchievementId;
+  label: string;
+  desc: string;
+}
 
 export interface GameContext {
   state: GameState;

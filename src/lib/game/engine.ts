@@ -50,6 +50,7 @@ import {
   Particle,
   Powerup,
   PowerupType,
+  RunStats,
   ScorePopup,
   Difficulty,
 } from "./types";
@@ -220,6 +221,7 @@ export function buildInitialState(
     stickyActive: false,
     fireballActive: false,
     shake: 0,
+    runStats: { bricksDestroyed: 0, bestCombo: 0, powerupsCollected: 0, levelReached: level, fireballKills: 0, deaths: 0 },
   };
 }
 
@@ -261,6 +263,7 @@ function buildNextLevelState(
     stickyActive: false,
     fireballActive: false,
     shake: 0,
+    runStats: { ...prev.runStats, levelReached: nextLevel },
   };
 }
 
@@ -610,6 +613,11 @@ export function updateGame(
   const newPowerups: Powerup[] = [...powerups];
   const survivingLasers: Laser[] = [];
 
+  // --- Run-stat accumulators for this frame ---
+  let destroyedThisFrame = 0;
+  let fireballKillsThisFrame = 0;
+  let powerupsCaughtThisFrame = 0;
+
   for (const laser of movedLasers) {
     let laserHit = false;
     for (let i = 0; i < laserBricks.length; i++) {
@@ -625,6 +633,7 @@ export function updateGame(
         newPopups.push({ x: b.x + b.w / 2, y: b.y + b.h / 2, text: `+${pts}`, life: 1.0, vy: -1.5 });
         spawnBrickParticles(newParticles, b);
         if (!stillAlive) {
+          destroyedThisFrame++;
           const drop = maybeDrop(b, level, state.difficulty);
           if (drop) newPowerups.push(drop);
         }
@@ -754,6 +763,8 @@ export function updateGame(
       });
 
       if (!stillAlive) {
+        destroyedThisFrame++;
+        if (fireballActive) fireballKillsThisFrame++;
         const drop = maybeDrop(b, level, state.difficulty);
         if (drop) newPowerups.push(drop);
         // Trigger screen shake on brick destruction
@@ -781,8 +792,15 @@ export function updateGame(
   const allBallsLost = survivingBalls.length === 0;
   if (allBallsLost) {
     const newLives = lives - 1;
+    const deathRunStats: RunStats = {
+      ...state.runStats,
+      bricksDestroyed: state.runStats.bricksDestroyed + destroyedThisFrame,
+      bestCombo: Math.max(state.runStats.bestCombo, newComboCount),
+      fireballKills: state.runStats.fireballKills + fireballKillsThisFrame,
+      deaths: state.runStats.deaths + 1,
+    };
     if (newLives <= 0) {
-      return { ...state, lives: 0, phase: "lost", shake: 0 };
+      return { ...state, lives: 0, phase: "lost", shake: 0, runStats: deathRunStats };
     }
     const paddleY = height - 48;
     return {
@@ -798,6 +816,7 @@ export function updateGame(
       ),
       stickyActive: false,
       shake: 0,
+      runStats: deathRunStats,
     };
   }
 
@@ -842,11 +861,22 @@ export function updateGame(
       if (effect.stickyActive !== undefined) currentStickyActive = effect.stickyActive;
       if (effect.lives !== undefined) currentLives = effect.lives;
       stateAfterPowerup = { ...stateAfterPowerup, ...effect };
+      powerupsCaughtThisFrame++;
       continue; // don't keep this powerup
     }
 
     survivingPowerups.push(moved);
   }
+
+  // --- Accumulate run stats for this frame ---
+  const runStats: RunStats = {
+    bricksDestroyed: state.runStats.bricksDestroyed + destroyedThisFrame,
+    bestCombo: Math.max(state.runStats.bestCombo, newComboCount),
+    powerupsCollected: state.runStats.powerupsCollected + powerupsCaughtThisFrame,
+    levelReached: Math.max(state.runStats.levelReached, level),
+    fireballKills: state.runStats.fireballKills + fireballKillsThisFrame,
+    deaths: state.runStats.deaths,
+  };
 
   // --- Combo reset after window expires ---
   const timeSinceLast = nowTime - newLastHitTime;
@@ -882,7 +912,7 @@ export function updateGame(
     if (level < TOTAL_LEVELS) {
       // Advance to next level
       const nextState = buildNextLevelState(
-        { ...state, score: newScore, lives: currentLives },
+        { ...state, score: newScore, lives: currentLives, runStats },
         width,
         height,
       );
@@ -906,6 +936,7 @@ export function updateGame(
       lastHitTime: newLastHitTime,
       stickyActive: currentStickyActive,
       shake: 0,
+      runStats,
     };
   }
 
@@ -928,6 +959,7 @@ export function updateGame(
     levelTransitionFrames: state.levelTransitionFrames,
     stickyActive: currentStickyActive,
     shake: newShake,
+    runStats,
   };
 }
 
