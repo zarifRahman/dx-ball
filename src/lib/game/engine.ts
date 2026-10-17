@@ -54,7 +54,7 @@ import {
   ScorePopup,
   Difficulty,
 } from "./types";
-import { LEVELS, TOTAL_LEVELS } from "./levels";
+import { LEVELS, TOTAL_LEVELS, type BrickGrid } from "./levels";
 
 export const DIFFICULTY_CONFIG: Record<
   Difficulty,
@@ -110,9 +110,9 @@ export const POWERUP_META: Record<
 
 // --- Brick layout builder ---
 
-function buildBricks(width: number, level: number, difficulty: Difficulty): Brick[] {
+function buildBricks(width: number, level: number, difficulty: Difficulty, gridOverride?: BrickGrid): Brick[] {
   const bricks: Brick[] = [];
-  const grid = LEVELS[(level - 1) % TOTAL_LEVELS];
+  const grid = gridOverride ?? LEVELS[(level - 1) % TOTAL_LEVELS];
   const cols = grid[0].length;
   const totalBricksWidth = cols * (BRICK_WIDTH + BRICK_PADDING) - BRICK_PADDING;
   const offsetX = (width - totalBricksWidth) / 2;
@@ -189,6 +189,7 @@ export function buildInitialState(
   level = 1,
   speedMultiplier = 1,
   difficulty: Difficulty = "normal",
+  opts: { gridOverride?: BrickGrid; isDaily?: boolean } = {},
 ): GameState {
   const paddleY = height - 48;
   const config = DIFFICULTY_CONFIG[difficulty];
@@ -202,7 +203,7 @@ export function buildInitialState(
       h: PADDLE_HEIGHT,
     },
     balls: [freshBall(width / 2, paddleY, speed, false)],
-    bricks: buildBricks(width, level, difficulty),
+    bricks: buildBricks(width, level, difficulty, opts.gridOverride),
     score: 0,
     lives: config.lives,
     phase: "waiting",
@@ -222,6 +223,7 @@ export function buildInitialState(
     fireballActive: false,
     shake: 0,
     runStats: { bricksDestroyed: 0, bestCombo: 0, powerupsCollected: 0, levelReached: level, fireballKills: 0, deaths: 0 },
+    isDaily: opts.isDaily ?? false,
   };
 }
 
@@ -264,6 +266,7 @@ function buildNextLevelState(
     fireballActive: false,
     shake: 0,
     runStats: { ...prev.runStats, levelReached: nextLevel },
+    isDaily: prev.isDaily,
   };
 }
 
@@ -909,7 +912,7 @@ export function updateGame(
 
   // If won and there are more levels, advance instead
   if (phase === "won") {
-    if (level < TOTAL_LEVELS) {
+    if (!state.isDaily && level < TOTAL_LEVELS) {
       // Advance to next level
       const nextState = buildNextLevelState(
         { ...state, score: newScore, lives: currentLives, runStats },

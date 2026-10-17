@@ -26,3 +26,27 @@ body {
   outline: 2px solid blue;
   outline-offset: 2px;
 } */
+
+/* New-high-score celebration flash on the end screen */
+@keyframes dxball-flash {
+  0%,
+  100% {
+    opacity: 1;
+    text-shadow: 0 0 12px #ffd60a, 0 0 24px #ffd60a99;
+  }
+  50% {
+    opacity: 0.55;
+    text-shadow: 0 0 20px #ffd60a, 0 0 44px #ffd60a;
+  }
+}
+
+.dxball-flash {
+  animation: dxball-flash 0.9s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dxball-flash {
+    animation: none;
+    text-shadow: 0 0 16px #ffd60a;
+  }
+}
