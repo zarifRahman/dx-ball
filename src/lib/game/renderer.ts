@@ -75,6 +75,7 @@ export function drawFrame(renderContext: RenderContext, state: GameState) {
     levelTransitionFrames,
     comboCount,
     shake,
+    fireballActive,
   } = state;
 
   // --- Screen shake transform ---
@@ -257,10 +258,10 @@ export function drawFrame(renderContext: RenderContext, state: GameState) {
         ball.r,
       );
       ballGrad.addColorStop(0, "#ffffff");
-      ballGrad.addColorStop(0.5, "#a0c4ff");
-      ballGrad.addColorStop(1, "#0a84ff");
+      ballGrad.addColorStop(0.5, fireballActive ? "#ffd27f" : "#a0c4ff");
+      ballGrad.addColorStop(1, fireballActive ? "#ff6a00" : "#0a84ff");
       ctx.fillStyle = ballGrad;
-      ctx.shadowColor = "#60afff";
+      ctx.shadowColor = fireballActive ? "#ff8c2b" : "#60afff";
       ctx.shadowBlur = 20;
       ctx.beginPath();
       ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
@@ -355,18 +356,32 @@ function drawHUD(
   canvasWidth: number,
   canvasHeight: number,
 ) {
-  ctx.font = 'bold 13px "Courier New", monospace';
   ctx.textBaseline = "top";
   ctx.shadowBlur = 0;
 
   // Score display (left)
   ctx.textAlign = "left";
-  ctx.fillStyle = "rgba(255,255,255,0.7)";
-  ctx.fillText(`SCORE  ${score.toString().padStart(6, "0")}`, 12, 14);
+  ctx.font = '600 10px "Courier New", monospace';
+  ctx.fillStyle = "rgba(96,175,255,0.75)";
+  ctx.fillText("SCORE", 12, 12);
+  ctx.font = 'bold 20px "Courier New", monospace';
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.fillText(score.toString().padStart(6, "0"), 12, 24);
 
-  // Level display (left, below score)
-  ctx.fillStyle = "rgba(255,213,10,0.8)";
-  ctx.fillText(`LEVEL  ${level}`, 12, 30);
+  // Level display (prominent, left, below score) — LEVEL n / TOTAL
+  ctx.font = '600 10px "Courier New", monospace';
+  ctx.fillStyle = "rgba(255,213,10,0.7)";
+  ctx.fillText("LEVEL", 12, 50);
+  ctx.font = 'bold 16px "Courier New", monospace';
+  ctx.fillStyle = "#ffd60a";
+  ctx.shadowColor = "#ffd60a";
+  ctx.shadowBlur = 10;
+  ctx.fillText(`${level}`, 12, 62);
+  ctx.shadowBlur = 0;
+  ctx.font = 'bold 12px "Courier New", monospace';
+  ctx.fillStyle = "rgba(255,213,10,0.45)";
+  const levelNumW = ctx.measureText(`${level}`).width;
+  ctx.fillText(`/ ${TOTAL_LEVELS}`, 12 + levelNumW + 6, 66);
 
   // Combo display (center, only when combo > 1)
   if (comboCount > 1) {
@@ -374,21 +389,26 @@ function drawHUD(
     ctx.fillStyle = "#ffd60a";
     ctx.shadowColor = "#ffd60a";
     ctx.shadowBlur = 12;
-    ctx.font = 'bold 15px "Courier New", monospace';
+    ctx.font = 'bold 17px "Courier New", monospace';
     ctx.fillText(`x${comboCount} COMBO!`, canvasWidth / 2, 14);
     ctx.shadowBlur = 0;
-    ctx.font = 'bold 13px "Courier New", monospace';
   }
 
-  // Lives display (right, as small balls)
+  // Lives display (right, as small balls) — show at least 3 slots, grow if more.
   ctx.textAlign = "right";
+  ctx.font = '600 10px "Courier New", monospace';
+  ctx.fillStyle = "rgba(96,175,255,0.75)";
+  ctx.shadowBlur = 0;
+  ctx.fillText("LIVES", canvasWidth - 12, 12);
+
+  const slots = Math.max(lives, 3);
   ctx.shadowColor = "#0a84ff";
   ctx.shadowBlur = 8;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < slots; i++) {
     ctx.globalAlpha = i < lives ? 1 : 0.18;
     ctx.fillStyle = "#0a84ff";
     ctx.beginPath();
-    ctx.arc(canvasWidth - 14 - i * 20, 20, 6, 0, Math.PI * 2);
+    ctx.arc(canvasWidth - 16 - i * 18, 34, 6, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.globalAlpha = 1;

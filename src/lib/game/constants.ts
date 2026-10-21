@@ -76,6 +76,7 @@ export const POWERUP_BASE_CHANCE = 0.20; // 20% chance per destroyed brick
 export const POWERUP_WIDEN_FRAMES = 900;    // 15 seconds
 export const POWERUP_SLOW_FRAMES = 600;     // 10 seconds
 export const POWERUP_STICKY_FRAMES = 900;   // 15 seconds
+export const POWERUP_FIREBALL_FRAMES = 540; // 9 seconds — ponytail: authentic DX-Ball fireball is brief; tune if too strong
 
 // Widen paddle multiplier
 export const POWERUP_WIDEN_MULTIPLIER = 1.5;

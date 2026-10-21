@@ -30,6 +30,7 @@ import {
   POWERUP_WIDEN_FRAMES,
   POWERUP_SLOW_FRAMES,
   POWERUP_STICKY_FRAMES,
+  POWERUP_FIREBALL_FRAMES,
   POWERUP_WIDEN_MULTIPLIER,
   POWERUP_SLOW_MULTIPLIER,
   LASER_WIDTH,
@@ -49,10 +50,11 @@ import {
   Particle,
   Powerup,
   PowerupType,
+  RunStats,
   ScorePopup,
   Difficulty,
 } from "./types";
-import { LEVELS, TOTAL_LEVELS } from "./levels";
+import { LEVELS, TOTAL_LEVELS, type BrickGrid } from "./levels";
 
 export const DIFFICULTY_CONFIG: Record<
   Difficulty,
@@ -103,13 +105,14 @@ export const POWERUP_META: Record<
   laser:     { color: "#ff3b30", label: "L" },
   slow:      { color: "#0a84ff", label: "B" },
   extralife: { color: "#ff2d55", label: "+" },
+  fireball:  { color: "#ff6a00", label: "F" },
 };
 
 // --- Brick layout builder ---
 
-function buildBricks(width: number, level: number, difficulty: Difficulty): Brick[] {
+function buildBricks(width: number, level: number, difficulty: Difficulty, gridOverride?: BrickGrid): Brick[] {
   const bricks: Brick[] = [];
-  const grid = LEVELS[(level - 1) % TOTAL_LEVELS];
+  const grid = gridOverride ?? LEVELS[(level - 1) % TOTAL_LEVELS];
   const cols = grid[0].length;
   const totalBricksWidth = cols * (BRICK_WIDTH + BRICK_PADDING) - BRICK_PADDING;
   const offsetX = (width - totalBricksWidth) / 2;
@@ -186,6 +189,7 @@ export function buildInitialState(
   level = 1,
   speedMultiplier = 1,
   difficulty: Difficulty = "normal",
+  opts: { gridOverride?: BrickGrid; isDaily?: boolean } = {},
 ): GameState {
   const paddleY = height - 48;
   const config = DIFFICULTY_CONFIG[difficulty];
@@ -199,7 +203,7 @@ export function buildInitialState(
       h: PADDLE_HEIGHT,
     },
     balls: [freshBall(width / 2, paddleY, speed, false)],
-    bricks: buildBricks(width, level, difficulty),
+    bricks: buildBricks(width, level, difficulty, opts.gridOverride),
     score: 0,
     lives: config.lives,
     phase: "waiting",
@@ -216,7 +220,10 @@ export function buildInitialState(
     speedMultiplier,
     difficulty,
     stickyActive: false,
+    fireballActive: false,
     shake: 0,
+    runStats: { bricksDestroyed: 0, bestCombo: 0, powerupsCollected: 0, levelReached: level, fireballKills: 0, deaths: 0 },
+    isDaily: opts.isDaily ?? false,
   };
 }
 
@@ -256,7 +263,10 @@ function buildNextLevelState(
     speedMultiplier: prev.speedMultiplier,
     difficulty: prev.difficulty,
     stickyActive: false,
+    fireballActive: false,
     shake: 0,
+    runStats: { ...prev.runStats, levelReached: nextLevel },
+    isDaily: prev.isDaily,
   };
 }
 
@@ -324,6 +334,7 @@ const POWERUP_TYPES: PowerupType[] = [
   "laser",
   "slow",
   "extralife",
+  "fireball",
 ];
 
 function maybeDrop(b: Brick, level: number, difficulty: Difficulty): Powerup | null {
@@ -386,6 +397,12 @@ function applyPowerup(
       const filtered = activePowerups.filter((a) => a.type !== "laser");
       filtered.push({ type: "laser", framesLeft: POWERUP_STICKY_FRAMES });
       return { activePowerups: filtered };
+    }
+
+    case "fireball": {
+      const filtered = activePowerups.filter((a) => a.type !== "fireball");
+      filtered.push({ type: "fireball", framesLeft: POWERUP_FIREBALL_FRAMES });
+      return { activePowerups: filtered, fireballActive: true };
     }
 
     case "multiball": {
@@ -455,6 +472,9 @@ function tickActivePowerups(
         case "laser":
           // No object to revert, timer just expires
           break;
+        case "fireball":
+          patch.fireballActive = false;
+          break;
       }
     }
   }
@@ -487,11 +507,6 @@ export interface ActionFlags {
 // identical at the fixed step regardless of display refresh rate.
 const FIXED_STEP_MS = 1000 / 60;
 
-// Pointer easing: paddle.x += (target - paddle.x) * factor. Tuned to glide
-// without lag at 60fps; scaled by dtScale so it stays consistent under the
-// fixed timestep.
-const POINTER_EASE_FACTOR = 0.35;
-
 function movePaddle(
   paddle: Paddle,
   balls: Ball[],
@@ -504,8 +519,9 @@ function movePaddle(
   const maxPaddleX = width - paddle.w;
   let px = paddle.x;
   if (actionFlags.pointerTargetX != null) {
-    const targetX = actionFlags.pointerTargetX - paddle.w / 2;
-    px += (targetX - px) * Math.min(1, POINTER_EASE_FACTOR * dtScale);
+    // Track the pointer directly (authentic DX-Ball feel). Render interpolation
+    // smooths the motion; easing here only added lag that read as "stuck".
+    px = actionFlags.pointerTargetX - paddle.w / 2;
   } else {
     if (keys["ArrowLeft"]) px -= PADDLE_SPEED * dtScale;
     if (keys["ArrowRight"]) px += PADDLE_SPEED * dtScale;
@@ -553,7 +569,7 @@ export function updateGame(
   if (state.phase !== "playing") return state;
 
   let { paddle, balls, stickyActive } = state;
-  const { bricks, score, lives, particles, popups, powerups, lasers, level, baseSpeed, comboCount, lastHitTime } = state;
+  const { bricks, score, lives, particles, popups, powerups, lasers, level, baseSpeed, comboCount, lastHitTime, fireballActive } = state;
   const { shake } = state;
 
   // Decay shake
@@ -596,6 +612,11 @@ export function updateGame(
   const newPowerups: Powerup[] = [...powerups];
   const survivingLasers: Laser[] = [];
 
+  // --- Run-stat accumulators for this frame ---
+  let destroyedThisFrame = 0;
+  let fireballKillsThisFrame = 0;
+  let powerupsCaughtThisFrame = 0;
+
   for (const laser of movedLasers) {
     let laserHit = false;
     for (let i = 0; i < laserBricks.length; i++) {
@@ -611,6 +632,7 @@ export function updateGame(
         newPopups.push({ x: b.x + b.w / 2, y: b.y + b.h / 2, text: `+${pts}`, life: 1.0, vy: -1.5 });
         spawnBrickParticles(newParticles, b);
         if (!stillAlive) {
+          destroyedThisFrame++;
           const drop = maybeDrop(b, level, state.difficulty);
           if (drop) newPowerups.push(drop);
         }
@@ -704,7 +726,8 @@ export function updateGame(
       if (!hit) continue;
 
       const newHits = b.hits - 1;
-      const stillAlive = newHits > 0;
+      // Fireball destroys any brick in one pass regardless of hit points
+      const stillAlive = fireballActive ? false : newHits > 0;
 
       spawnBrickParticles(newParticles, b);
 
@@ -739,11 +762,16 @@ export function updateGame(
       });
 
       if (!stillAlive) {
+        destroyedThisFrame++;
+        if (fireballActive) fireballKillsThisFrame++;
         const drop = maybeDrop(b, level, state.difficulty);
         if (drop) newPowerups.push(drop);
         // Trigger screen shake on brick destruction
         newShake = SHAKE_FRAMES;
       }
+
+      // Fireball plows straight through — no bounce, keeps destroying bricks this frame
+      if (fireballActive) continue;
 
       // Resolve bounce direction
       const overlapX = Math.abs(dx);
@@ -763,8 +791,15 @@ export function updateGame(
   const allBallsLost = survivingBalls.length === 0;
   if (allBallsLost) {
     const newLives = lives - 1;
+    const deathRunStats: RunStats = {
+      ...state.runStats,
+      bricksDestroyed: state.runStats.bricksDestroyed + destroyedThisFrame,
+      bestCombo: Math.max(state.runStats.bestCombo, newComboCount),
+      fireballKills: state.runStats.fireballKills + fireballKillsThisFrame,
+      deaths: state.runStats.deaths + 1,
+    };
     if (newLives <= 0) {
-      return { ...state, lives: 0, phase: "lost", shake: 0 };
+      return { ...state, lives: 0, phase: "lost", shake: 0, runStats: deathRunStats };
     }
     const paddleY = height - 48;
     return {
@@ -780,6 +815,7 @@ export function updateGame(
       ),
       stickyActive: false,
       shake: 0,
+      runStats: deathRunStats,
     };
   }
 
@@ -824,11 +860,22 @@ export function updateGame(
       if (effect.stickyActive !== undefined) currentStickyActive = effect.stickyActive;
       if (effect.lives !== undefined) currentLives = effect.lives;
       stateAfterPowerup = { ...stateAfterPowerup, ...effect };
+      powerupsCaughtThisFrame++;
       continue; // don't keep this powerup
     }
 
     survivingPowerups.push(moved);
   }
+
+  // --- Accumulate run stats for this frame ---
+  const runStats: RunStats = {
+    bricksDestroyed: state.runStats.bricksDestroyed + destroyedThisFrame,
+    bestCombo: Math.max(state.runStats.bestCombo, newComboCount),
+    powerupsCollected: state.runStats.powerupsCollected + powerupsCaughtThisFrame,
+    levelReached: Math.max(state.runStats.levelReached, level),
+    fireballKills: state.runStats.fireballKills + fireballKillsThisFrame,
+    deaths: state.runStats.deaths,
+  };
 
   // --- Combo reset after window expires ---
   const timeSinceLast = nowTime - newLastHitTime;
@@ -861,10 +908,10 @@ export function updateGame(
 
   // If won and there are more levels, advance instead
   if (phase === "won") {
-    if (level < TOTAL_LEVELS) {
+    if (!state.isDaily && level < TOTAL_LEVELS) {
       // Advance to next level
       const nextState = buildNextLevelState(
-        { ...state, score: newScore, lives: currentLives },
+        { ...state, score: newScore, lives: currentLives, runStats },
         width,
         height,
       );
@@ -888,6 +935,7 @@ export function updateGame(
       lastHitTime: newLastHitTime,
       stickyActive: currentStickyActive,
       shake: 0,
+      runStats,
     };
   }
 
@@ -910,6 +958,7 @@ export function updateGame(
     levelTransitionFrames: state.levelTransitionFrames,
     stickyActive: currentStickyActive,
     shake: newShake,
+    runStats,
   };
 }
 
