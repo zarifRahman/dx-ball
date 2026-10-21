@@ -3,6 +3,7 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { buildInitialState, DIFFICULTY_CONFIG, updateGame } from '@/lib/game/engine';
 import { drawFrame } from '@/lib/game/renderer';
+import { CANVAS_WIDTH, CANVAS_HEIGHT } from '@/lib/game/constants';
 import {
   Difficulty,
   GameSpeed,
@@ -184,7 +185,9 @@ export default function DxBallGame() {
     level: 1,
     comboCount: 1,
   });
-  const [dimensions, setDimensions] = useState({ width: 0, height: 0, screenWidth: 0 });
+  // CSS display size of the canvas (logical resolution is fixed at CANVAS_WIDTH×HEIGHT).
+  // `ready` flips true after the first client-side measure so SSR renders a 0-sized board.
+  const [display, setDisplay] = useState({ width: 0, height: 0, ready: false });
 
   // Menu / overlay React state
   const [menuView, setMenuView] = useState<MenuView>('main');
@@ -210,36 +213,30 @@ export default function DxBallGame() {
   }, []);
 
   // --- Initialization and Resize Handling ---
+  // Logical resolution is FIXED (CANVAS_WIDTH×CANVAS_HEIGHT); the engine and
+  // renderer always run at those dims. Resize only recomputes the CSS display
+  // size — the largest 3:4 rectangle that fits the window — and the dark page
+  // background fills any letterbox area.
   useEffect(() => {
+    const ASPECT = CANVAS_WIDTH / CANVAS_HEIGHT; // 0.75
+
     const handleResize = () => {
-      const screenWidth = window.innerWidth;
-      const screenHeight = window.innerHeight;
+      let cssH = window.innerHeight;
+      let cssW = cssH * ASPECT;
+      if (cssW > window.innerWidth) {
+        cssW = window.innerWidth;
+        cssH = cssW / ASPECT;
+      }
+      setDisplay({ width: cssW, height: cssH, ready: true });
 
-      const gameWidth = Math.min(screenWidth, 600);
-      const gameHeight = screenHeight;
-
-      setDimensions({ width: gameWidth, height: gameHeight, screenWidth });
-
+      // Build the initial state once; dims are constant so later resizes don't
+      // rebuild. Start on the menu, not the waiting screen.
       if (!stateRef.current) {
         const { speed, difficulty } = settingsRef.current;
-        const s = buildInitialState(gameWidth, gameHeight, 1, SPEED_MULTIPLIERS[speed], difficulty);
-        // Start on the menu, not the waiting screen
+        const s = buildInitialState(
+          CANVAS_WIDTH, CANVAS_HEIGHT, 1, SPEED_MULTIPLIERS[speed], difficulty,
+        );
         stateRef.current = { ...s, phase: 'menu' };
-      } else {
-        if (stateRef.current.phase === 'waiting' || stateRef.current.phase === 'menu') {
-          const currentLevel = stateRef.current.level;
-          const currentPhase = stateRef.current.phase;
-          const { speed, difficulty } = settingsRef.current;
-          stateRef.current = {
-            ...buildInitialState(gameWidth, gameHeight, currentLevel, SPEED_MULTIPLIERS[speed], difficulty),
-            phase: currentPhase,
-          };
-        } else {
-          stateRef.current.paddle.x = Math.min(
-            stateRef.current.paddle.x,
-            gameWidth - stateRef.current.paddle.w,
-          );
-        }
       }
     };
 
@@ -373,33 +370,33 @@ export default function DxBallGame() {
   }, []);
 
   const startGame = useCallback(() => {
-    if (!stateRef.current || dimensions.width === 0) return;
+    if (!stateRef.current || !display.ready) return;
     scoreSavedRef.current = false;
     setEndInfo(null);
     setPending(null);
     const speedMultiplier = SPEED_MULTIPLIERS[settingsRef.current.speed];
     const fresh = buildInitialState(
-      dimensions.width,
-      dimensions.height,
+      CANVAS_WIDTH,
+      CANVAS_HEIGHT,
       1,
       speedMultiplier,
       settingsRef.current.difficulty,
     );
     stateRef.current = { ...fresh, phase: 'waiting' };
     resetRunRefs();
-  }, [dimensions, resetRunRefs]);
+  }, [display.ready, resetRunRefs]);
 
   // --- Start the deterministic daily challenge ---
   const startDaily = useCallback(() => {
-    if (!stateRef.current || dimensions.width === 0) return;
+    if (!stateRef.current || !display.ready) return;
     scoreSavedRef.current = false;
     setEndInfo(null);
     setPending(null);
     const challenge = dailyChallenge();
     const speedMultiplier = SPEED_MULTIPLIERS[settingsRef.current.speed];
     const fresh = buildInitialState(
-      dimensions.width,
-      dimensions.height,
+      CANVAS_WIDTH,
+      CANVAS_HEIGHT,
       1,
       speedMultiplier,
       challenge.difficulty,
@@ -407,19 +404,22 @@ export default function DxBallGame() {
     );
     stateRef.current = { ...fresh, phase: 'waiting' };
     resetRunRefs();
-  }, [dimensions, resetRunRefs]);
+  }, [display.ready, resetRunRefs]);
 
   // --- Game Loop ---
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || dimensions.width === 0) return;
+    if (!canvas || !display.ready) return;
 
-    const { width, height } = dimensions;
+    // Logical resolution is fixed; the engine/renderer always run at these dims.
+    const width = CANVAS_WIDTH;
+    const height = CANVAS_HEIGHT;
     const devicePixelRatio = window.devicePixelRatio || 1;
+    // Internal buffer = logical × dpr; CSS display size letterboxes into the window.
     canvas.width = width * devicePixelRatio;
     canvas.height = height * devicePixelRatio;
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
+    canvas.style.width = `${display.width}px`;
+    canvas.style.height = `${display.height}px`;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -568,7 +568,7 @@ export default function DxBallGame() {
         cancelAnimationFrame(rafRef.current);
       }
     };
-  }, [dimensions, handleGameEnd]);
+  }, [display.width, display.height, display.ready, handleGameEnd]);
 
   // --- Input Handling ---
   useEffect(() => {
@@ -634,7 +634,7 @@ export default function DxBallGame() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [dimensions, startGame]);
+  }, [startGame]);
 
   const canDrivePaddle = useCallback(() => {
     return (
@@ -655,8 +655,10 @@ export default function DxBallGame() {
     const rect = canvas.getBoundingClientRect();
     if (clientX < rect.left || clientX > rect.right) return;
 
-    // Set the desired paddle CENTRE; the engine eases toward it (single writer).
-    pointerTargetXRef.current = clientX - rect.left;
+    // Remap CSS pixels → fixed logical coords; the engine eases toward this
+    // CENTRE (single writer). rect.width is the CSS display width.
+    pointerTargetXRef.current =
+      (clientX - rect.left) * (CANVAS_WIDTH / rect.width);
   }, [canDrivePaddle]);
 
   const handlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -712,18 +714,18 @@ export default function DxBallGame() {
 
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     if (!canDrivePaddle()) return;
-    const canvas = canvasRef.current;
     const paddle = stateRef.current?.paddle;
-    if (!canvas || !paddle) return;
+    if (!paddle) return;
 
     const horizontalDelta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : 0;
     if (horizontalDelta === 0) return;
 
     e.preventDefault();
+    // pointerTargetX is in fixed logical coords — clamp against CANVAS_WIDTH.
     const currentCenter = pointerTargetXRef.current ?? paddle.x + paddle.w / 2;
     pointerTargetXRef.current = Math.max(
       0,
-      Math.min(canvas.getBoundingClientRect().width, currentCenter + horizontalDelta),
+      Math.min(CANVAS_WIDTH, currentCenter + horizontalDelta),
     );
   }, [canDrivePaddle]);
 
@@ -752,7 +754,7 @@ export default function DxBallGame() {
       <div
         ref={gameAreaRef}
         className="relative bg-black shadow-[0_0_100px_rgba(0,0,0,0.5)] overflow-hidden"
-        style={{ width: dimensions.width, height: dimensions.height }}
+        style={{ width: display.width, height: display.height }}
         onPointerMove={handlePointerMove}
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerEnd}
@@ -878,6 +880,7 @@ export default function DxBallGame() {
                 bestScore={selectedBest}
                 difficulty={settings.difficulty}
                 speed={settings.speed}
+                onDifficultyChange={updateDifficulty}
                 onPlay={() => { initAudio(); startGame(); }}
                 onDaily={() => { initAudio(); startDaily(); }}
                 onHighScores={() => setMenuView('highscores')}
@@ -916,6 +919,7 @@ function MainMenu({
   bestScore,
   difficulty,
   speed,
+  onDifficultyChange,
   onPlay,
   onDaily,
   onHighScores,
@@ -924,13 +928,14 @@ function MainMenu({
   bestScore: number;
   difficulty: Difficulty;
   speed: GameSpeed;
+  onDifficultyChange: (d: Difficulty) => void;
   onPlay: () => void;
   onDaily: () => void;
   onHighScores: () => void;
   onSettings: () => void;
 }) {
   return (
-    <div className="flex flex-col items-center gap-8 px-6 w-full max-w-xs">
+    <div className="flex flex-col items-center gap-6 px-6 w-full max-w-xs">
       {/* Title */}
       <div className="text-center">
         <h1
@@ -956,6 +961,21 @@ function MainMenu({
         <div className="mt-1 font-mono font-bold text-2xl text-yellow-300 tabular-nums">
           {bestScore.toString().padStart(6, '0')}
         </div>
+      </div>
+
+      {/* Primary pre-game choice: difficulty */}
+      <div className="flex w-full flex-col gap-2">
+        <span
+          id="menu-difficulty-label"
+          className="font-mono text-[10px] text-white/50 uppercase tracking-widest"
+        >
+          Difficulty
+        </span>
+        <DifficultySegment
+          value={difficulty}
+          onChange={onDifficultyChange}
+          labelId="menu-difficulty-label"
+        />
       </div>
 
       {/* Buttons */}
@@ -1216,11 +1236,53 @@ function HighScoresPanel({
   );
 }
 
+// `normal` is surfaced to players as "Medium" (spec); the engine value stays `normal`.
 const DIFFICULTY_OPTIONS: { value: Difficulty; label: string; note: string }[] = [
   { value: 'easy', label: 'Easy', note: '4 lives' },
-  { value: 'normal', label: 'Normal', note: 'balanced' },
+  { value: 'normal', label: 'Medium', note: 'balanced' },
   { value: 'hard', label: 'Hard', note: '2 lives' },
 ];
+
+// Shared Easy / Medium / Hard segmented control — used on the start screen and
+// in Settings, both bound to the same `settings.difficulty` via updateDifficulty.
+function DifficultySegment({
+  value,
+  onChange,
+  labelId,
+}: {
+  value: Difficulty;
+  onChange: (d: Difficulty) => void;
+  labelId: string;
+}) {
+  return (
+    <div role="radiogroup" aria-labelledby={labelId} className="grid grid-cols-3 gap-2">
+      {DIFFICULTY_OPTIONS.map((opt) => {
+        const active = value === opt.value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(opt.value)}
+            className={[
+              'min-h-[58px] px-2 py-2 rounded-lg font-mono uppercase border transition-all',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+              active
+                ? 'bg-blue-600/60 border-blue-400/50 text-white shadow-[0_0_16px_rgba(10,132,255,0.3)]'
+                : 'bg-white/5 border-white/10 text-white/40 hover:bg-white/10 hover:text-white/70',
+            ].join(' ')}
+          >
+            <span className="block text-xs font-bold tracking-widest">{opt.label}</span>
+            <span className="block mt-1 text-[9px] tracking-normal normal-case text-white/45">
+              {opt.note}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 const SPEED_OPTIONS: { value: GameSpeed; label: string }[] = [
   { value: '0.75', label: '0.75x' },
@@ -1254,7 +1316,7 @@ function SettingsPanel({
       </h2>
 
       <div className="flex flex-col gap-5 w-full">
-        {/* Difficulty segmented control */}
+        {/* Difficulty segmented control (shared with the start screen) */}
         <div className="flex flex-col gap-2">
           <span
             id="difficulty-label"
@@ -1262,36 +1324,11 @@ function SettingsPanel({
           >
             Difficulty
           </span>
-          <div
-            role="radiogroup"
-            aria-labelledby="difficulty-label"
-            className="grid grid-cols-3 gap-2"
-          >
-            {DIFFICULTY_OPTIONS.map((opt) => {
-              const active = settings.difficulty === opt.value;
-              return (
-                <button
-                  key={opt.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
-                  onClick={() => onDifficultyChange(opt.value)}
-                  className={[
-                    'min-h-[58px] px-2 py-2 rounded-lg font-mono uppercase border transition-all',
-                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
-                    active
-                      ? 'bg-blue-600/60 border-blue-400/50 text-white'
-                      : 'bg-white/5 border-white/10 text-white/40 hover:bg-white/10 hover:text-white/70',
-                  ].join(' ')}
-                >
-                  <span className="block text-xs font-bold tracking-widest">{opt.label}</span>
-                  <span className="block mt-1 text-[9px] tracking-normal normal-case text-white/45">
-                    {opt.note}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+          <DifficultySegment
+            value={settings.difficulty}
+            onChange={onDifficultyChange}
+            labelId="difficulty-label"
+          />
         </div>
 
         {/* Game speed segmented control */}
