@@ -507,11 +507,6 @@ export interface ActionFlags {
 // identical at the fixed step regardless of display refresh rate.
 const FIXED_STEP_MS = 1000 / 60;
 
-// Pointer easing: paddle.x += (target - paddle.x) * factor. Tuned to glide
-// without lag at 60fps; scaled by dtScale so it stays consistent under the
-// fixed timestep.
-const POINTER_EASE_FACTOR = 0.35;
-
 function movePaddle(
   paddle: Paddle,
   balls: Ball[],
@@ -524,8 +519,9 @@ function movePaddle(
   const maxPaddleX = width - paddle.w;
   let px = paddle.x;
   if (actionFlags.pointerTargetX != null) {
-    const targetX = actionFlags.pointerTargetX - paddle.w / 2;
-    px += (targetX - px) * Math.min(1, POINTER_EASE_FACTOR * dtScale);
+    // Track the pointer directly (authentic DX-Ball feel). Render interpolation
+    // smooths the motion; easing here only added lag that read as "stuck".
+    px = actionFlags.pointerTargetX - paddle.w / 2;
   } else {
     if (keys["ArrowLeft"]) px -= PADDLE_SPEED * dtScale;
     if (keys["ArrowRight"]) px += PADDLE_SPEED * dtScale;

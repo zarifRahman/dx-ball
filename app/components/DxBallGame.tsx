@@ -130,6 +130,31 @@ function vibrate(ms: number, hapticsEnabled: boolean): void {
 
 type MenuView = 'main' | 'highscores' | 'settings';
 
+// Render interpolation: the sim runs in fixed 60fps steps but we draw every rAF.
+// On high-refresh (120Hz/ProMotion) displays that mismatch makes the paddle hold
+// then jump. Lerp the drawn paddle/ball positions between the two latest sim
+// states by `alpha` (fraction into the next step) for smooth motion. Returns a
+// throwaway render state; the authoritative sim state is untouched. Skip when the
+// phase changed (ball resets/level swaps teleport — interpolating would smear).
+function interpolateForRender(
+  prev: GameState | null,
+  cur: GameState,
+  alpha: number,
+): GameState {
+  if (!prev || alpha <= 0 || prev.phase !== cur.phase) return cur;
+  const lerp = (a: number, b: number) => a + (b - a) * alpha;
+  const paddle = { ...cur.paddle, x: lerp(prev.paddle.x, cur.paddle.x) };
+  const balls =
+    prev.balls.length === cur.balls.length
+      ? cur.balls.map((b, i) => ({
+          ...b,
+          x: lerp(prev.balls[i].x, b.x),
+          y: lerp(prev.balls[i].y, b.y),
+        }))
+      : cur.balls;
+  return { ...cur, paddle, balls };
+}
+
 // End-screen summary captured at game end (stateRef isn't reactive).
 interface EndInfo {
   won: boolean;
@@ -177,6 +202,8 @@ export default function DxBallGame() {
   // when no pointer is driving the paddle. Single source for touch/mouse input;
   // consumed by the engine each fixed step (no direct paddle mutation).
   const pointerTargetXRef = useRef<number | null>(null);
+  // Sim state one fixed-step behind current, for render interpolation.
+  const prevStepStateRef = useRef<GameState | null>(null);
 
   const [uiState, setUiState] = useState({
     score: 0,
@@ -450,6 +477,7 @@ export default function DxBallGame() {
         // a huge backlog that would fast-forward on resume).
         if (stateRef.current.phase === 'menu') {
           accumulator = 0;
+          prevStepStateRef.current = null;
         } else {
           let steps = 0;
           while (accumulator >= FIXED_STEP_MS && steps < MAX_STEPS_PER_FRAME) {
@@ -462,6 +490,9 @@ export default function DxBallGame() {
             launchFlagRef.current = false;
             fireLaserFlagRef.current = false;
 
+            // Keep the pre-step state as the interpolation anchor (persists
+            // across frames so no-step frames still interpolate smoothly).
+            prevStepStateRef.current = stateRef.current;
             stateRef.current = updateGame(
               stateRef.current,
               keysRef.current,
@@ -478,8 +509,11 @@ export default function DxBallGame() {
           if (steps >= MAX_STEPS_PER_FRAME) accumulator = 0;
         }
 
-        // Render once per animation frame after stepping.
-        drawFrame({ ctx: ctx!, canvasWidth: width, canvasHeight: height }, stateRef.current);
+        // Render once per animation frame, interpolating between the last two
+        // sim states by how far we are into the next step (smooths high-refresh).
+        const alpha = Math.min(1, accumulator / FIXED_STEP_MS);
+        const renderState = interpolateForRender(prevStepStateRef.current, stateRef.current, alpha);
+        drawFrame({ ctx: ctx!, canvasWidth: width, canvasHeight: height }, renderState);
 
         const { score, lives, phase, level, comboCount, activePowerups } = stateRef.current;
 
