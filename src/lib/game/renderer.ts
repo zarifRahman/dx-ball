@@ -1,7 +1,6 @@
 // lib/game/renderer.ts
 import { GameState, RenderContext } from "./types";
 import { POWERUP_META } from "./engine";
-import { TOTAL_LEVELS } from "./levels";
 import { SHAKE_MAGNITUDE } from "./constants";
 
 // Helper to draw rounded rectangles
@@ -63,8 +62,6 @@ export function drawFrame(renderContext: RenderContext, state: GameState) {
     paddle,
     balls,
     bricks,
-    score,
-    lives,
     phase,
     particles,
     popups,
@@ -73,7 +70,6 @@ export function drawFrame(renderContext: RenderContext, state: GameState) {
     activePowerups,
     level,
     levelTransitionFrames,
-    comboCount,
     shake,
     fireballActive,
   } = state;
@@ -270,8 +266,8 @@ export function drawFrame(renderContext: RenderContext, state: GameState) {
     });
   }
 
-  // --- HUD (Score, Lives, Level, Combo, Active Powerups) ---
-  drawHUD(ctx, score, lives, level, comboCount, activePowerups, canvasWidth, canvasHeight);
+  // --- Active powerup pills (bottom-left); the React overlay draws the main HUD ---
+  drawActivePowerups(ctx, activePowerups, canvasHeight);
 
   // --- Overlay screens ---
   if (phase === "waiting")
@@ -281,22 +277,8 @@ export function drawFrame(renderContext: RenderContext, state: GameState) {
       "#0a84ff",
       canvasWidth, canvasHeight,
     );
-  if (phase === "won")
-    drawOverlay(
-      ctx, "YOU WIN!",
-      level >= TOTAL_LEVELS
-        ? `ALL LEVELS COMPLETE! Score: ${score} — press SPACE`
-        : `Score: ${score} — press SPACE to play again`,
-      "#ffd60a",
-      canvasWidth, canvasHeight,
-    );
-  if (phase === "lost")
-    drawOverlay(
-      ctx, "GAME OVER",
-      `Final score: ${score} — press SPACE to restart`,
-      "#ff2d55",
-      canvasWidth, canvasHeight,
-    );
+  // won/lost are handled by the React GameOverPanel overlay (run stats, name
+  // entry, replay) — no canvas overlay needed here.
   if (phase === "paused")
     drawOverlay(
       ctx, "PAUSED",
@@ -346,75 +328,16 @@ function drawLevelTransition(
   ctx.shadowBlur = 0;
 }
 
-function drawHUD(
+// Active powerup pills (bottom-left strip). Score/lives/level/combo are drawn by
+// the React HUD overlay — keeping them here too would double-draw and overlap.
+function drawActivePowerups(
   ctx: CanvasRenderingContext2D,
-  score: number,
-  lives: number,
-  level: number,
-  comboCount: number,
   activePowerups: GameState["activePowerups"],
-  canvasWidth: number,
   canvasHeight: number,
 ) {
   ctx.textBaseline = "top";
   ctx.shadowBlur = 0;
 
-  // Score display (left)
-  ctx.textAlign = "left";
-  ctx.font = '600 10px "Courier New", monospace';
-  ctx.fillStyle = "rgba(96,175,255,0.75)";
-  ctx.fillText("SCORE", 12, 12);
-  ctx.font = 'bold 20px "Courier New", monospace';
-  ctx.fillStyle = "rgba(255,255,255,0.92)";
-  ctx.fillText(score.toString().padStart(6, "0"), 12, 24);
-
-  // Level display (prominent, left, below score) — LEVEL n / TOTAL
-  ctx.font = '600 10px "Courier New", monospace';
-  ctx.fillStyle = "rgba(255,213,10,0.7)";
-  ctx.fillText("LEVEL", 12, 50);
-  ctx.font = 'bold 16px "Courier New", monospace';
-  ctx.fillStyle = "#ffd60a";
-  ctx.shadowColor = "#ffd60a";
-  ctx.shadowBlur = 10;
-  ctx.fillText(`${level}`, 12, 62);
-  ctx.shadowBlur = 0;
-  ctx.font = 'bold 12px "Courier New", monospace';
-  ctx.fillStyle = "rgba(255,213,10,0.45)";
-  const levelNumW = ctx.measureText(`${level}`).width;
-  ctx.fillText(`/ ${TOTAL_LEVELS}`, 12 + levelNumW + 6, 66);
-
-  // Combo display (center, only when combo > 1)
-  if (comboCount > 1) {
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#ffd60a";
-    ctx.shadowColor = "#ffd60a";
-    ctx.shadowBlur = 12;
-    ctx.font = 'bold 17px "Courier New", monospace';
-    ctx.fillText(`x${comboCount} COMBO!`, canvasWidth / 2, 14);
-    ctx.shadowBlur = 0;
-  }
-
-  // Lives display (right, as small balls) — show at least 3 slots, grow if more.
-  ctx.textAlign = "right";
-  ctx.font = '600 10px "Courier New", monospace';
-  ctx.fillStyle = "rgba(96,175,255,0.75)";
-  ctx.shadowBlur = 0;
-  ctx.fillText("LIVES", canvasWidth - 12, 12);
-
-  const slots = Math.max(lives, 3);
-  ctx.shadowColor = "#0a84ff";
-  ctx.shadowBlur = 8;
-  for (let i = 0; i < slots; i++) {
-    ctx.globalAlpha = i < lives ? 1 : 0.18;
-    ctx.fillStyle = "#0a84ff";
-    ctx.beginPath();
-    ctx.arc(canvasWidth - 16 - i * 18, 34, 6, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-  ctx.shadowBlur = 0;
-
-  // Active powerup indicators (bottom-left strip)
   if (activePowerups.length > 0) {
     const PILL_W = 28;
     const PILL_H = 12;
